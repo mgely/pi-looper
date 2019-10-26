@@ -16,7 +16,7 @@ class Looper:
     def __init__(self):
 
         # setup timing
-        self.bpm = 100
+        self.bpm = 500
         self.start_time = time.time()
         self.timing_precision = 0.3e-3 # half a milisecond
 

@@ -33,12 +33,16 @@ def metronome(metronome_on_flag, bpm, start_time, timing_precision, filename):
     total_n_beats = 0
     while True:
         if start_time+total_n_beats*seconds_between_beats<time.time():
-            total_n_beats += 1
             if metronome_on_flag.isSet():
-                sd.play(metronome_sound,
+                if total_n_beats%4 ==1:
+                    logging.debug('one')
+                    to_play = metronome_sound
+                else:
+                    to_play = metronome_sound/2
+                sd.play(to_play,
                     samplerate=metronome_sr)
                 # sd.wait()
-                # logging.debug('bip')
+            total_n_beats += 1
         time.sleep(timing_precision)
 
 
