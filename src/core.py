@@ -1,6 +1,7 @@
 import RPi.GPIO as GPIO
 import sounddevice as sd
-from recording import recorder
+import soundfile as sf
+from daemons import recorder,metronome
 import threading
 import os
 import logging
@@ -14,19 +15,45 @@ logging.basicConfig(level=logging.DEBUG,
 class Looper:
     def __init__(self):
 
-        self.filename = 'test.wav'
-        self.directory = '/home/pi/Desktop/pi-looper-data/'
-        self.directory += datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d__%H-%M-%S')
-        os.mkdir(self.directory)
+        # setup timing
+        self.bpm = 100
+        self.start_time = time.time()
+        self.timing_precision = 0.3e-3 # half a milisecond
+
+        self.repo_directory = '/home/pi/Desktop/pi-looper/'
+        self.src_directory = '/home/pi/Desktop/pi-looper/src/'
+
+        self.temp_recording_filename = 'test.wav'
+        self.recording_directory = '/home/pi/Desktop/pi-looper-data/'
+        self.recording_directory += datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d__%H-%M-%S')
+        os.mkdir(self.recording_directory)
+
+        # Configure metronome
+        metronome_file = self.src_directory+'data/high_hat_001.wav'
+        self.metronome_on_flag = threading.Event()
+        self.metronome_thread = threading.Thread(name='metronome',
+                      target=metronome,
+                      args=(self.metronome_on_flag,
+                            self.bpm,
+                            self.start_time,
+                            self.timing_precision,
+                            metronome_file),
+                      daemon = True)
+        self.metronome_thread.start()
+        self.metronome_on()
+
         self.record_flag = threading.Event()
         self.recording_thread = threading.Thread(name='recorder',
                       target=recorder,
-                      args=(self.record_flag,self.filename,self.directory,),
+                      args=(self.record_flag,
+                        self.timing_precision,
+                      self.temp_recording_filename,
+                      self.recording_directory,),
                       daemon = True)
         self.recording_thread.start()
 
         try:
-            os.remove(self.filename)
+            os.remove(self.temp_recording_filename)
         except FileNotFoundError:
             pass
 
@@ -50,6 +77,12 @@ class Looper:
         # Setup event on pin RISING edge
         GPIO.add_event_detect(self.record_button, GPIO.RISING, callback = self.push_record)
 
+    def metronome_on(self):
+        self.metronome_on_flag.set()
+
+    def metronome_off():
+        self.metronome_on_flag.clear()
+
 
     def push_record(self,pin):
         # pin should be integer value of self.record_button
@@ -66,6 +99,7 @@ class Looper:
             # turn off record LED
             GPIO.output(self.record_led, GPIO.LOW)
             self.state = 'PLAYBACK'
+
 
 if __name__ == "__main__":
     Looper()
