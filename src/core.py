@@ -4,6 +4,8 @@ from recording import recorder
 import threading
 import os
 import logging
+from datetime import datetime
+import time
 
 logging.basicConfig(level=logging.DEBUG,
                     format='(%(threadName)-10s) %(message)s',
@@ -13,7 +15,9 @@ class Looper:
     def __init__(self):
 
         self.filename = 'test.wav'
-        self.directory = ''
+        self.directory = '/home/pi/Desktop/pi-looper-data/'
+        self.directory += datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d__%H-%M-%S')
+        os.mkdir(self.directory)
         self.record_flag = threading.Event()
         self.recording_thread = threading.Thread(name='recorder',
                       target=recorder,
