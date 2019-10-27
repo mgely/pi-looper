@@ -19,6 +19,24 @@ except channels, dtype, callback and finished_callback
 device_info = sd.query_devices(None, 'input')
 samplerate = int(device_info['default_samplerate'])
 
+def player(on_flag,t_repetition, start_time, timing_precision, filename):
+
+    # Extract data and sampling rate from file
+    sound, sr = sf.read(filename)
+    sound /= np.amax(sound)
+    logging.debug('loop samplerate '+str(sr))
+
+    n = int((time.time()-start_time)/t_repetition)
+    while True:
+        if start_time+n*t_repetition<time.time():
+            if on_flag.isSet():
+                logging.debug('loop one')
+                sd.play(sound,
+                    samplerate=sr)
+                # sd.wait()
+            n += 1
+        time.sleep(timing_precision)
+
 
 def metronome(metronome_on_flag, bpm, start_time, timing_precision, filename):
 
@@ -38,6 +56,7 @@ def metronome(metronome_on_flag, bpm, start_time, timing_precision, filename):
                     logging.debug('one')
                     to_play = metronome_sound
                 else:
+                    logging.debug('tik')
                     to_play = metronome_sound/2
                 sd.play(to_play,
                     samplerate=metronome_sr)
@@ -46,14 +65,11 @@ def metronome(metronome_on_flag, bpm, start_time, timing_precision, filename):
         time.sleep(timing_precision)
 
 
-def recorder(recording_flag, timing_precision, filename = '', directory = ''):
+def recorder(recording_flag, timing_precision, filename):
     """
     adapted from
     https://github.com/spatialaudio/python-sounddevice/blob/master/examples/rec_unlimited.py
     """
-
-    recording_file = tempfile.mktemp(prefix=filename,
-                                        suffix='.wav', dir=directory)
 
     q = queue.Queue()
 
@@ -63,8 +79,8 @@ def recorder(recording_flag, timing_precision, filename = '', directory = ''):
             print(status, file=sys.stderr)
         q.put(indata.copy())
 
-    # Make sure the file is opened before recording anything:
-    with sf.SoundFile(recording_file, mode='x',channels = 1, samplerate=samplerate) as file:
+    # TODO: edit channels for stereo?
+    with sf.SoundFile(filename, mode='x',channels = 1, samplerate=samplerate) as file:
         with sd.InputStream(samplerate=samplerate,channels = 1,callback=callback):
             logging.debug('temporary file name: '+file.name)
             while True:
