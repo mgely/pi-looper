@@ -1,3 +1,5 @@
+import matplotlib.pyplot as plt
+import numpy as np
 import RPi.GPIO as GPIO
 import sounddevice as sd
 import soundfile as sf
@@ -31,6 +33,7 @@ class Looper:
         self.recording_directory += datetime.fromtimestamp(
             time.time()).strftime('%Y-%m-%d__%H-%M-%S/')
         os.mkdir(self.recording_directory)
+        time.sleep(self.timing_precision)
         self.temp_recording_filename = self.recording_directory+'temp.wav'
         self.loop_filename = self.recording_directory+'loop_{:03d}.wav'
 
@@ -82,30 +85,44 @@ class Looper:
         # Setup event on pin RISING edge
         GPIO.add_event_detect(self.record_button, GPIO.RISING, callback = self.push_record)
 
+    def measure_latency(self):
+        # Assuming metronome is on
+        self.start_recording()
+        time.sleep(60/self.bpm*4.9)
+        self.stop_recording()
+        time.sleep(self.timing_precision)
+        calibration_filename = self.recording_directory+'latency_measurement'
+        shutil.copyfile(self.temp_recording_filename, calibration_filename)
+        time.sleep(self.timing_precision)
+        sound, sr = sf.read(calibration_filename)
+        plt.plot(sound)
+
     def metronome_on(self):
         self.metronome_on_flag.set()
 
-    def metronome_off():
+    def metronome_off(self):
         self.metronome_on_flag.clear()
 
+    def start_recording(self):
+        # turn on record LED
+        GPIO.output(self.record_led, GPIO.HIGH)
+        # start recording
+        self.record_flag.set()
 
-    def push_record(self,pin):
+    def stop_recording(self):
+        self.record_flag.clear()
+        # turn off record LED
+        GPIO.output(self.record_led, GPIO.LOW)
+
+    def push_record(self,pin = 0):
         # pin should be integer value of self.record_button
         if self.state in ['IDLE','PLAYBACK']:
             self.state = 'RECORDING'
-            # turn on record LED
-            GPIO.output(self.record_led, GPIO.HIGH)
-            # start recording
-            self.record_flag.set()
+            self.start_recording()
 
         elif self.state == 'RECORDING':
-            # stop recording
-            self.record_flag.clear()
-            # turn off record LED
-            GPIO.output(self.record_led, GPIO.LOW)
+            self.stop_recording()
             self.state = 'PLAYBACK'
-
-            # Start loop playback
             self.n_loop += 1
             loop_filename = self.loop_filename.format(self.n_loop)
             shutil.copyfile(self.temp_recording_filename, loop_filename)
@@ -128,5 +145,22 @@ class Looper:
 
 
 if __name__ == "__main__":
-    Looper()
+    l = Looper()
+    time.sleep(1)
+    l.metronome_on()
+    t_repetition = 60/l.bpm
+    n = int((time.time()-l.start_time)/t_repetition)# beats so far
+    while l.start_time+(n+1)*t_repetition<time.time():
+        time.sleep(self.timing_precision)
+    t_start = time.time()
+    l.start_recording()
+    time.sleep(t_repetition)
+    l.stop_recording()
+    time.sleep(l.timing_precision)
+    calibration_filename = l.recording_directory+'latency_measurement'
+    shutil.copyfile(l.temp_recording_filename, calibration_filename)
+    time.sleep(l.timing_precision)
+    sound, sr = sf.read(calibration_filename)
+    plt.plot(np.linspace(0,t_repetition,len(sound)),np.absolute(sound))
+    plt.show()
     # GPIO.cleanup() # erase all predefined behavior of GPIO ports

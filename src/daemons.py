@@ -23,14 +23,13 @@ def player(on_flag,t_repetition, start_time, timing_precision, filename):
 
     # Extract data and sampling rate from file
     sound, sr = sf.read(filename)
-    sound /= np.amax(sound)
     logging.debug('loop samplerate '+str(sr))
 
     n = int((time.time()-start_time)/t_repetition)
     while True:
         if start_time+n*t_repetition<time.time():
             if on_flag.isSet():
-                logging.debug('loop one')
+                # logging.debug('loop one')
                 sd.play(sound,
                     samplerate=sr)
                 # sd.wait()
@@ -53,10 +52,10 @@ def metronome(metronome_on_flag, bpm, start_time, timing_precision, filename):
         if start_time+total_n_beats*seconds_between_beats<time.time():
             if metronome_on_flag.isSet():
                 if total_n_beats%4 ==1:
-                    logging.debug('one')
+                    # logging.debug('one')
                     to_play = metronome_sound
                 else:
-                    logging.debug('tik')
+                    # logging.debug('tik')
                     to_play = metronome_sound/2
                 sd.play(to_play,
                     samplerate=metronome_sr)
@@ -79,7 +78,9 @@ def recorder(recording_flag, timing_precision, filename):
             print(status, file=sys.stderr)
         q.put(indata.copy())
 
-    # TODO: edit channels for stereo?
+    with open(filename,mode = 'w'):
+        pass
+
     with sf.SoundFile(filename, mode='x',channels = 1, samplerate=samplerate) as file:
         with sd.InputStream(samplerate=samplerate,channels = 1,callback=callback):
             logging.debug('temporary file name: '+file.name)
