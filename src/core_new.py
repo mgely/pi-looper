@@ -30,19 +30,19 @@ class Looper(object):
 
     transitions = [
         # trigger                       # source        # destination
-        ['release_rec_button',          'play',         'pre_rec']
+        ['release_rec_button',          'play',         'pre_rec'],
         #
-        ['bar_starts',                  'pre_rec',      'rec']
-        ['release_play_button',         'pre_rec',      'play']
-        ['release_back_button',         'pre_rec',      'play']
+        ['start_recording',            'pre_rec',      'rec'],
+        ['release_play_button',         'pre_rec',      'play'],
+        ['release_back_button',         'pre_rec',      'play'],
         #
-        ['release_play_button',         'rec',          'pre_play']
-        ['release_rec_button',          'rec',          'pre_rec']
-        ['release_back_button',         'rec',          'play']
+        ['release_play_button',         'rec',          'pre_play'],
+        ['release_rec_button',          'rec',          'pre_rec'],
+        ['release_back_button',         'rec',          'play'],
         #
-        ['loop_ends',                   'pre_play',     'play'] # added current recording
-        ['release_rec_button',          'pre_play',     'pre_rec']
-        ['release_back_button',         'pre_play',     'play'] # didnt add current recording
+        ['end_recording',              'pre_play',     'play'], # added current recording
+        ['release_rec_button',          'pre_play',     'pre_rec'],
+        ['release_back_button',         'pre_play',     'play'], # didnt add current recording
     ]
 
     def __init__(self):
@@ -50,7 +50,7 @@ class Looper(object):
             initial = 'play')
         self.scheduled_events = []
         self.init_hardware()
-
+        
     def init_hardware(self):
 
         # LEDs
@@ -68,9 +68,17 @@ class Looper(object):
         # Button events
         self.rec_button.when_deactivated = self.release_rec_button
         self.play_button.when_deactivated = self.release_play_button
-        self.forw_button.when_deactivated = self.release_forw_button
+        # self.forw_button.when_deactivated = self.release_forw_button
         self.back_button.when_deactivated = self.release_back_button
     
+    def start_recording(self):
+        print('TODO: START RECORDING')
+        self.trigger('start_recording')
+
+    def end_recording(self):
+        print('TODO: ADD RECORDING TO LOOPS')
+        self.trigger('end_recording')
+
     def all_leds_off(self):
         for l in [self.rec_led,self.play_led]:
             l.off()
@@ -87,6 +95,7 @@ class Looper(object):
     def on_enter_play(self):
         self.on_enter()
         self.play_led.on()
+        print('TODO: STOP ALL RECORDINGS')
         
     def on_enter_rec(self):
         self.on_enter()
@@ -95,12 +104,19 @@ class Looper(object):
     def on_enter_pre_play(self):
         self.on_enter()
         self.play_led.blink()
-        event = Timer(2,self.loop_ends)
+
+        event = Timer(2,self.end_recording)
+        event.start()
+        self.scheduled_events.append(event)
+
         
     def on_enter_pre_rec(self):
         self.on_enter()
         self.rec_led.blink()
-        event = Timer(2,self.bar_starts)
+        
+        event = Timer(2,self.start_recording)
+        event.start()
+        self.scheduled_events.append(event)
 
 
 if __name__ == "__main__":
