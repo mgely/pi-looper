@@ -11,6 +11,7 @@
 
 from gpiozero import LED, Button
 from time import sleep
+from threading import Timer
 from transitions import Machine, State
 
 # Set up logging; The basic log level will be DEBUG
@@ -25,17 +26,29 @@ GPIO_buttons = [15,23,25,7]
 
 class Looper(object):
 
-    states = ['rec', 'play']
+    states = ['rec', 'play', 'pre_rec', 'pre_play']
 
     transitions = [
         # trigger                       # source        # destination
-        ['release_rec_button',          'play',         'rec'],
-        ['release_play_button',         'rec',          'play'],
+        ['release_rec_button',          'play',         'pre_rec']
+        #
+        ['bar_starts',                  'pre_rec',      'rec']
+        ['release_play_button',         'pre_rec',      'play']
+        ['release_back_button',         'pre_rec',      'play']
+        #
+        ['release_play_button',         'rec',          'pre_play']
+        ['release_rec_button',          'rec',          'pre_rec']
+        ['release_back_button',         'rec',          'play']
+        #
+        ['loop_ends',                   'pre_play',     'play'] # added current recording
+        ['release_rec_button',          'pre_play',     'pre_rec']
+        ['release_back_button',         'pre_play',     'play'] # didnt add current recording
     ]
 
     def __init__(self):
         self.machine = Machine(model = self,states = self.states, transitions = self.transitions, 
-            initial = 'initial')
+            initial = 'play')
+        self.scheduled_events = []
         self.init_hardware()
 
     def init_hardware(self):
@@ -55,13 +68,21 @@ class Looper(object):
         # Button events
         self.rec_button.when_deactivated = self.release_rec_button
         self.play_button.when_deactivated = self.release_play_button
+        self.forw_button.when_deactivated = self.release_forw_button
+        self.back_button.when_deactivated = self.release_back_button
     
     def all_leds_off(self):
         for l in [self.rec_led,self.play_led]:
             l.off()
 
+    def cancel_all_scheduled_events(self):
+        for i in range(len(self.scheduled_events)):
+            self.scheduled_events[i].cancel()
+        self.scheduled_events = []
+
     def on_enter(self):
         self.all_leds_off()
+        self.cancel_all_scheduled_events()
 
     def on_enter_play(self):
         self.on_enter()
@@ -70,6 +91,16 @@ class Looper(object):
     def on_enter_rec(self):
         self.on_enter()
         self.rec_led.on()
+        
+    def on_enter_pre_play(self):
+        self.on_enter()
+        self.play_led.blink()
+        event = Timer(2,self.loop_ends)
+        
+    def on_enter_pre_rec(self):
+        self.on_enter()
+        self.rec_led.blink()
+        event = Timer(2,self.bar_starts)
 
 
 if __name__ == "__main__":
