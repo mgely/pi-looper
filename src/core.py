@@ -41,6 +41,7 @@ class Looper(object):
         self.sample_rate = 44100
         self.check_sample_rates()
         self.n_loop = 0
+        self.n_loop_previous = 0
         self.loops = []
 
         self.machine = Machine(model = self,states = self.states, transitions = self.transitions, 
@@ -72,7 +73,17 @@ class Looper(object):
 
     def update_loop(self):
         if self.n_loop > 0:
-            self.loop = sum(self.loops)
+            if self.n_loop != self.n_loop_previous:
+                self.n_loop_previous = self.n_loop
+
+                loop_lengths = [len(l) for l in self.loops[:self.n_loop]]
+                longest_loop_n_samples = max(loop_lengths)
+                longest_loop_index = loop_lengths.index(max(loop_lengths))
+
+                self.loop = self.loops[longest_loop_index]
+                for i,l in enumerate(self.loops):
+                    if i != longest_loop_index:
+                        self.loop += np.tile(l,(longest_loop_n_samples/len(l),1))
         else:
             self.loop = self.metronome_loop
         self.loop_time = float(len(self.loop))/float(self.sample_rate)
@@ -169,9 +180,24 @@ class Looper(object):
         self.trigger('end_recording')
 
     def add_recording_to_loops(self):
+        # Extract audio
         loop_filename = self.loop_filename.format(self.n_loop)
         shutil.copyfile(self.temp_recording_filename, loop_filename)
         sound, sr = sf.read(loop_filename)
+
+        # Round the number of samples to the nearest number of bars
+        n_samples_in_loop = round(float(len(sound))/float(self.samples_per_beat*4))*self.samples_per_beat*4
+
+        if len(sound) > n_samples_in_loop:
+            loop = sound[:n_samples_in_loop]
+        else:
+            loop = np.zeros((n_samples_in_loop,2))
+            loop[:len(sound)] = sound
+        
+        self.loops.append(loop)
+        self.n_loop += 1
+        self.update_loop()
+
 
     def all_leds_off(self):
         for l in [self.rec_led,self.play_led]:
@@ -183,8 +209,8 @@ class Looper(object):
         self.scheduled_events = []
 
     def on_enter(self):
-        self.all_leds_off()
         self.cancel_all_scheduled_events()
+        self.all_leds_off()
 
     def on_enter_play(self):
         self.on_enter()
@@ -222,9 +248,9 @@ class Looper(object):
         def start_blinking():
             led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat-self.blink_on_time)
 
-        
         t = threading.Timer(self.time_to_next_beat() ,start_blinking)
         t.start()
+        self.scheduled_events.append(t)
         
 
     def on_enter_pre_rec(self):
