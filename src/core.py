@@ -1,34 +1,108 @@
-import matplotlib.pyplot as plt
-import numpy as np
-import RPi.GPIO as GPIO
-import sounddevice as sd
-import soundfile as sf
-from daemons import recorder,metronome, player
-import threading
 import os
-import logging
-from datetime import datetime
-import time
 import shutil
+from gpiozero import LED, Button
+import time
+from datetime import datetime
+import threading
+from transitions import Machine, State
+import soundfile as sf
+import sounddevice as sd
+import numpy as np
+import daemons
+import logging
+logging.basicConfig(level=logging.DEBUG,format='(%(threadName)-10s) %(message)s')
+logging.getLogger('transitions').setLevel(logging.INFO)
 
-logging.basicConfig(level=logging.DEBUG,
-                    format='(%(threadName)-10s) %(message)s',
-                    )
 
-class Looper:
+
+class Looper(object):
+
+    states = ['rec', 'play', 'pre_rec', 'pre_play']
+
+    transitions = [
+        # trigger                       # source        # destination
+        ['release_rec_button',          'play',         'pre_rec'],
+        #
+        ['start_recording',            'pre_rec',      'rec'],
+        ['release_play_button',         'pre_rec',      'play'],
+        ['release_back_button',         'pre_rec',      'play'],
+        #
+        ['release_play_button',         'rec',          'pre_play'],
+        ['release_rec_button',          'rec',          'pre_rec'],
+        ['release_back_button',         'rec',          'play'],
+        #
+        ['end_recording',              'pre_play',     'play'], # added current recording
+        ['release_rec_button',          'pre_play',     'pre_rec'],
+        ['release_back_button',         'pre_play',     'play'], # didnt add current recording
+    ]
+
     def __init__(self):
-
-        # setup timing
-        self.bpm = 80
-        self.start_time = time.time()
-        self.timing_precision = 0.3e-3 # half a milisecond
-
-        self.loop_on_flags = []
+        
+        self.sample_rate = 44100
+        self.check_sample_rates()
         self.n_loop = 0
+        self.loops = []
 
+        self.machine = Machine(model = self,states = self.states, transitions = self.transitions, 
+            initial = 'play')
+        self.init_hardware()
+        self.init_timing()
+        self.init_files()
+        self.init_metronome()
+        self.init_recording()
+
+        self.scheduled_events = []
+
+        self.update_loop()
+        self.loop_player()
+
+    def check_sample_rates(self):
+
+        device_info = sd.query_devices(None, 'input')
+        logging.debug(device_info)
+        samplerate_input = int(device_info['default_samplerate'])
+        if samplerate_input != self.sample_rate:
+            raise RuntimeError('Wrong input sample rate: %d instead of %d'%(samplerate_input,self.sample_rate))
+
+        device_info = sd.query_devices(None, 'output')
+        logging.debug(device_info)
+        samplerate_output = int(device_info['default_samplerate'])
+        if samplerate_output != self.sample_rate:
+            raise RuntimeError('Wrong ouptut sample rate: %d instead of %d'%(samplerate_output,self.sample_rate))
+
+    def update_loop(self):
+        if self.n_loop > 0:
+            self.loop = sum(self.loops)
+        else:
+            self.loop = self.metronome_loop
+        self.loop_time = float(len(self.loop))/float(self.sample_rate)
+        logging.debug('Loop duration = %.2f s'%self.loop_time)
+
+    def loop_player(self):
+        sd.play(self.loop,samplerate=self.sample_rate)
+        if self.start_time is None:
+            self.start_time = time.time()
+        else:
+            self.start_time += self.loop_time
+
+        t = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
+        t.start()
+
+    def init_recording(self):
+        
+        self.record_flag = threading.Event()
+        self.recording_thread = threading.Thread(name='recorder',
+                      target=daemons.recorder,
+                      args=(self.record_flag,
+                        self.timing_precision,
+                      self.temp_recording_filename),
+                      daemon = True)
+        self.recording_thread.start()
+
+    def init_files(self):
+        
         self.repo_directory = '/home/pi/Desktop/pi-looper/'
         self.src_directory = '/home/pi/Desktop/pi-looper/src/'
-
         self.recording_directory = '/home/pi/Desktop/pi-looper-data/'
         self.recording_directory += datetime.fromtimestamp(
             time.time()).strftime('%Y-%m-%d__%H-%M-%S/')
@@ -37,130 +111,132 @@ class Looper:
         self.temp_recording_filename = self.recording_directory+'temp.wav'
         self.loop_filename = self.recording_directory+'loop_{:03d}.wav'
 
-        # Configure metronome
+    def init_metronome(self):
+        
         metronome_file = self.src_directory+'data/high_hat_001.wav'
-        self.metronome_on_flag = threading.Event()
-        self.metronome_thread = threading.Thread(name='metronome',
-                      target=metronome,
-                      args=(self.metronome_on_flag,
-                            self.bpm,
-                            self.start_time,
-                            self.timing_precision,
-                            metronome_file),
-                      daemon = True)
-        self.metronome_thread.start()
-        self.metronome_on()
+        # Extract data and sampling rate from file
+        metronome_sound, metronome_sr = sf.read(metronome_file)
+        if metronome_sr != self.sample_rate:
+            raise RuntimeError('Wrong metronome sample rate: %d instead of %d'%(metronome_sr,self.sample_rate))
+        
+        if len(metronome_sound) > self.samples_per_beat:
+            self.metronome_loop = metronome_sound[:self.samples_per_beat]
+        else:
+            self.metronome_loop = np.zeros((self.samples_per_beat,2))
+            self.metronome_loop[:len(metronome_sound)] = metronome_sound
 
-        self.record_flag = threading.Event()
-        self.recording_thread = threading.Thread(name='recorder',
-                      target=recorder,
-                      args=(self.record_flag,
-                        self.timing_precision,
-                      self.temp_recording_filename),
-                      daemon = True)
-        self.recording_thread.start()
+        # Make it 4/4
+        self.metronome_loop = np.concatenate((self.metronome_loop,np.tile(self.metronome_loop/2,(3,1))))
 
-        try:
-            os.remove(self.temp_recording_filename)
-        except FileNotFoundError:
-            pass
+    def init_timing(self):
+        self.bpm = 120
+        self.seconds_per_beat = 60./float(self.bpm)
+        self.samples_per_beat = int(self.sample_rate*self.seconds_per_beat)
+        self.start_time = None
+        self.timing_precision = 0.3e-3 # half a milisecond
+        # TODO: deal with latency
 
-        #samplerate
-        self.sr = 44100
 
-        # GPIO setup
-        self.record_led = 4
-        self.record_button = 14
-        self.state = 'IDLE'
+    def init_hardware(self):
 
-        GPIO.setmode(GPIO.BCM) # call pins by GPIO not PIN numbers, see https://raspberrypi.stackexchange.com/questions/12966/what-is-the-difference-between-board-and-bcm-for-gpio-pin-numbering
-        # setup recording LED
-        # see https://thepihut.com/blogs/raspberry-pi-tutorials/27968772-turning-on-an-led-with-your-raspberry-pis-gpio-pins
-        GPIO.setup(self.record_led, GPIO.OUT) # setup as output
-        GPIO.output(self.record_led,GPIO.LOW) # turn off
-        # setup push button
-        # see https://raspberrypihq.com/use-a-push-button-with-raspberry-pi-gpio/
-        # Set pin to be an input pin and set initial value to be pulled low (off)
-        GPIO.setup(self.record_button, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-        # Setup event on pin RISING edge
-        GPIO.add_event_detect(self.record_button, GPIO.RISING, callback = self.push_record)
+        # LEDs
+        self.rec_led = LED(18)
+        self.play_led = LED(8)
+        self.back_led = LED(14)
+        self.forw_led = LED(24)
 
-    def measure_latency(self):
-        # Assuming metronome is on
-        self.start_recording()
-        time.sleep(60/self.bpm*4.9)
-        self.stop_recording()
-        time.sleep(self.timing_precision)
-        calibration_filename = self.recording_directory+'latency_measurement'
-        shutil.copyfile(self.temp_recording_filename, calibration_filename)
-        time.sleep(self.timing_precision)
-        sound, sr = sf.read(calibration_filename)
-        plt.plot(sound)
+        # Buttons
+        self.rec_button = Button(23)
+        self.play_button = Button(7)
+        self.back_button = Button(15)
+        self.forw_button = Button(25)
 
-    def metronome_on(self):
-        self.metronome_on_flag.set()
+        # Button events
+        self.rec_button.when_deactivated = self.release_rec_button
+        self.play_button.when_deactivated = self.release_play_button
+        # self.forw_button.when_deactivated = self.release_forw_button
+        self.back_button.when_deactivated = self.release_back_button
 
-    def metronome_off(self):
-        self.metronome_on_flag.clear()
+        self.blink_on_time = 60./240. #seconds
 
     def start_recording(self):
-        # turn on record LED
-        GPIO.output(self.record_led, GPIO.HIGH)
-        # start recording
         self.record_flag.set()
+        self.trigger('start_recording')
 
-    def stop_recording(self):
+    def end_recording(self):
         self.record_flag.clear()
-        # turn off record LED
-        GPIO.output(self.record_led, GPIO.LOW)
+        self.add_recording_to_loops()
+        self.trigger('end_recording')
 
-    def push_record(self,pin = 0):
-        # pin should be integer value of self.record_button
-        if self.state in ['IDLE','PLAYBACK']:
-            self.state = 'RECORDING'
-            self.start_recording()
+    def add_recording_to_loops(self):
+        loop_filename = self.loop_filename.format(self.n_loop)
+        shutil.copyfile(self.temp_recording_filename, loop_filename)
+        sound, sr = sf.read(loop_filename)
 
-        elif self.state == 'RECORDING':
-            self.stop_recording()
-            self.state = 'PLAYBACK'
-            self.n_loop += 1
-            loop_filename = self.loop_filename.format(self.n_loop)
-            shutil.copyfile(self.temp_recording_filename, loop_filename)
-            loop_on_flag = threading.Event()
-            self.loop_on_flags += [loop_on_flag]
-            t_repetition = 4*60/self.bpm # duration of loop
-            time.sleep(self.timing_precision)
-            loop_thread = threading.Thread(
-                name = self.loop_filename.format(self.n_loop),
-                target = player,
-                args=(loop_on_flag,
-                    t_repetition,
-                    self.start_time,
-                    self.timing_precision,
-                    loop_filename),
-                daemon = True)
-            loop_thread.start()
-            loop_on_flag.set()
-            self.metronome_on_flag.clear()
+    def all_leds_off(self):
+        for l in [self.rec_led,self.play_led]:
+            l.off()
 
+    def cancel_all_scheduled_events(self):
+        for i in range(len(self.scheduled_events)):
+            self.scheduled_events[i].cancel()
+        self.scheduled_events = []
+
+    def on_enter(self):
+        self.all_leds_off()
+        self.cancel_all_scheduled_events()
+
+    def on_enter_play(self):
+        self.on_enter()
+
+        self.play_led.on()
+        self.record_flag.clear()
+
+    def on_enter_rec(self):
+        self.on_enter()
+        self.rec_led.on()
+    
+    def time_to_next_loop_start(self):
+        return self.start_time + self.loop_time - time.time()
+
+    def on_enter_pre_play(self):
+        self.on_enter()
+
+        event = threading.Timer(self.time_to_next_loop_start() ,self.end_recording)
+        event.start()
+        self.scheduled_events.append(event)
+
+
+        self.blink(self.play_led)
+    
+    def time_to_next_beat(self):
+        
+        t = self.start_time - time.time()
+        while t < 0:
+            t += self.seconds_per_beat
+        return t
+        
+
+    def blink(self, led):
+
+        def start_blinking():
+            led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat-self.blink_on_time)
+
+        
+        t = threading.Timer(self.time_to_next_beat() ,start_blinking)
+        t.start()
+        
+
+    def on_enter_pre_rec(self):
+        self.on_enter()
+        
+        event = threading.Timer(self.time_to_next_loop_start() ,self.start_recording)
+        event.start()
+        self.scheduled_events.append(event)
+        
+        self.blink(self.rec_led)
 
 if __name__ == "__main__":
-    l = Looper()
-    time.sleep(1)
-    l.metronome_on()
-    t_repetition = 60/l.bpm
-    n = int((time.time()-l.start_time)/t_repetition)# beats so far
-    while l.start_time+(n+1)*t_repetition<time.time():
-        time.sleep(self.timing_precision)
-    t_start = time.time()
-    l.start_recording()
-    time.sleep(t_repetition)
-    l.stop_recording()
-    time.sleep(l.timing_precision)
-    calibration_filename = l.recording_directory+'latency_measurement'
-    shutil.copyfile(l.temp_recording_filename, calibration_filename)
-    time.sleep(l.timing_precision)
-    sound, sr = sf.read(calibration_filename)
-    plt.plot(np.linspace(0,t_repetition,len(sound)),np.absolute(sound))
-    plt.show()
-    # GPIO.cleanup() # erase all predefined behavior of GPIO ports
+    l = Looper()    
+    while True:
+        time.sleep(l.timing_precision)
