@@ -33,8 +33,8 @@ def recorder(recording_flag, timing_precision, filename):
             print(status, file=sys.stderr)
         q.put(indata.copy())
 
-    with sf.SoundFile(filename, mode='x',channels = 2, samplerate=samplerate, dtype='float32') as file:
-        with sd.InputStream(samplerate=samplerate,channels = 2,callback=callback, latency = 'high', dtype='float32'):
+    with sf.SoundFile(filename, mode='x',channels = 2, samplerate=samplerate) as file:
+        with sd.InputStream(samplerate=samplerate,channels = 2,callback=callback, latency = 0.05, dtype='float32'):
             logging.debug('temporary file name: '+file.name)
             while True:
                 file.truncate(1) # Deletes contents of the file

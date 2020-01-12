@@ -41,13 +41,15 @@ class Looper(object):
     def __init__(self):
         
         self.sample_rate = 44100
+        self.latency = 45e-3 # seconds (half of what is measured in the test_latency script)
+        self.latency_samples = int(float(self.latency)*float(self.sample_rate))
         self.audio_out = sd.OutputStream(
             samplerate=self.sample_rate,
             channels = 2,
-            latency = 'high',
+            latency = 0.05,
             dtype='float32')
         self.audio_out.start()
-
+        
         self.n_loop = 0
         self.n_loop_previous = 0
         self.loops = []
@@ -81,16 +83,23 @@ class Looper(object):
                 self.n_loop_previous = self.n_loop
 
                 loop_lengths = [len(l) for l in self.loops[:self.n_loop]]
-                longest_loop_n_samples = max(loop_lengths)
-                longest_loop_index = loop_lengths.index(max(loop_lengths))
+                loop_n_samples = round(max(loop_lengths)/self.samples_per_beat)*self.samples_per_beat
 
-                self.loop = self.loops[longest_loop_index]
-                for i,l in enumerate(self.loops):
-                    if i != longest_loop_index:
-                        self.loop += np.tile(l,(round(longest_loop_n_samples/len(l)),1))
+                self.loop = np.zeros((loop_n_samples,2), dtype = 'float32')
+                for l in self.loops:
+                    l = np.tile(l,(round(loop_n_samples/len(l)),1))
+  
+                    # Adjust for latency
+                    l = l[self.latency_samples:]
+
+                    if len(l) > loop_n_samples:
+                        self.loop += l[:loop_n_samples]
+                    else:
+                        self.loop[:len(l)] += l
                 logging.debug('Loop updated.')
         else:
             self.loop = self.metronome_loop
+
         self.loop_time = float(len(self.loop))/float(self.sample_rate)
         logging.debug('Loop duration = %.2f s'%self.loop_time)
 
@@ -118,6 +127,8 @@ class Looper(object):
         logging.debug('Loop starting')
         # sd.stop()
         # sd.play(self.loop,samplerate=self.sample_rate, latency = 'high')
+        self.audio_out.stop()
+        self.audio_out.start()
         self.audio_out.write(self.loop)
         
 
@@ -159,7 +170,7 @@ class Looper(object):
         if len(metronome_sound) > self.samples_per_beat:
             self.metronome_loop = metronome_sound[:self.samples_per_beat]
         else:
-            self.metronome_loop = np.zeros((self.samples_per_beat,2))
+            self.metronome_loop = np.zeros((self.samples_per_beat,2), dtype = 'float32')
             self.metronome_loop[:len(metronome_sound)] = metronome_sound
 
         # Make it 4/4
@@ -231,7 +242,7 @@ class Looper(object):
         if len(sound) > n_samples_in_loop:
             loop = sound[:n_samples_in_loop]
         else: 
-            loop = np.zeros((n_samples_in_loop,2))
+            loop = np.zeros((n_samples_in_loop,2), dtype = 'float32')
             loop[:len(sound)] = sound
         
         self.loops.append(loop)
@@ -288,7 +299,8 @@ class Looper(object):
         self.blink(self.rec_led)
 
 if __name__ == "__main__":
-    with Looper() as l:
-        time.sleep(0.3)
-    # while True:
-    #     time.sleep(l.timing_precision)
+    # with Looper() as l:
+    #     time.sleep(0.3)
+    l = Looper()
+    while True:
+        time.sleep(l.timing_precision)
