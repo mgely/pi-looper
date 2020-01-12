@@ -39,7 +39,6 @@ class Looper(object):
     def __init__(self):
         
         self.sample_rate = 44100
-        self.check_sample_rates()
         self.n_loop = 0
         self.n_loop_previous = 0
         self.loops = []
@@ -52,28 +51,12 @@ class Looper(object):
         self.init_metronome()
         self.init_recording()
 
-        self.scheduled_events = []
-
-        self.update_loop()
         self.loop_player()
-
-    def check_sample_rates(self):
-
-        device_info = sd.query_devices(None, 'input')
-        logging.debug(device_info)
-        samplerate_input = int(device_info['default_samplerate'])
-        if samplerate_input != self.sample_rate:
-            raise RuntimeError('Wrong input sample rate: %d instead of %d'%(samplerate_input,self.sample_rate))
-
-        device_info = sd.query_devices(None, 'output')
-        logging.debug(device_info)
-        samplerate_output = int(device_info['default_samplerate'])
-        if samplerate_output != self.sample_rate:
-            raise RuntimeError('Wrong ouptut sample rate: %d instead of %d'%(samplerate_output,self.sample_rate))
 
     def update_loop(self):
         if self.n_loop > 0:
             if self.n_loop != self.n_loop_previous:
+                logging.debug('Updating loop...')
                 self.n_loop_previous = self.n_loop
 
                 loop_lengths = [len(l) for l in self.loops[:self.n_loop]]
@@ -83,21 +66,41 @@ class Looper(object):
                 self.loop = self.loops[longest_loop_index]
                 for i,l in enumerate(self.loops):
                     if i != longest_loop_index:
-                        self.loop += np.tile(l,(longest_loop_n_samples/len(l),1))
+                        self.loop += np.tile(l,(round(longest_loop_n_samples/len(l)),1))
+                logging.debug('Loop updated.')
         else:
             self.loop = self.metronome_loop
         self.loop_time = float(len(self.loop))/float(self.sample_rate)
         logging.debug('Loop duration = %.2f s'%self.loop_time)
 
     def loop_player(self):
-        sd.play(self.loop,samplerate=self.sample_rate)
+
+        # At beginning of loop, exit pre- states
+        if self.state == 'pre_rec':
+            self.start_recording()
+        elif self.state == 'pre_play':
+            self.end_recording()
+
+        # Set beginning of loop time
+        # Important: should always be before the loop
+        # is updated.
         if self.start_time is None:
             self.start_time = time.time()
+            logging.debug('Starting time set')
         else:
             self.start_time += self.loop_time
 
-        t = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
-        t.start()
+        # Append the loop with new recordings
+        self.update_loop()
+        
+        # Start playing the updated loop
+        logging.debug('Loop starting')
+        sd.stop()
+        sd.play(self.loop,samplerate=self.sample_rate)
+
+        # Schedule the loop to play in a loop-durations time
+        self.player_thread = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
+        self.player_thread.start()
 
     def init_recording(self):
         
@@ -170,6 +173,20 @@ class Looper(object):
 
         self.blink_on_time = 60./240. #seconds
 
+        # Check sample rates of input and output devices
+
+        device_info = sd.query_devices(None, 'input')
+        logging.debug(device_info)
+        samplerate_input = int(device_info['default_samplerate'])
+        if samplerate_input != self.sample_rate:
+            raise RuntimeError('Wrong input sample rate: %d instead of %d'%(samplerate_input,self.sample_rate))
+
+        device_info = sd.query_devices(None, 'output')
+        logging.debug(device_info)
+        samplerate_output = int(device_info['default_samplerate'])
+        if samplerate_output != self.sample_rate:
+            raise RuntimeError('Wrong ouptut sample rate: %d instead of %d'%(samplerate_output,self.sample_rate))
+
     def start_recording(self):
         self.record_flag.set()
         self.trigger('start_recording')
@@ -190,26 +207,19 @@ class Looper(object):
 
         if len(sound) > n_samples_in_loop:
             loop = sound[:n_samples_in_loop]
-        else:
+        else: 
             loop = np.zeros((n_samples_in_loop,2))
             loop[:len(sound)] = sound
         
         self.loops.append(loop)
         self.n_loop += 1
-        self.update_loop()
 
 
     def all_leds_off(self):
         for l in [self.rec_led,self.play_led]:
             l.off()
 
-    def cancel_all_scheduled_events(self):
-        for i in range(len(self.scheduled_events)):
-            self.scheduled_events[i].cancel()
-        self.scheduled_events = []
-
     def on_enter(self):
-        self.cancel_all_scheduled_events()
         self.all_leds_off()
 
     def on_enter_play(self):
@@ -223,16 +233,12 @@ class Looper(object):
         self.rec_led.on()
     
     def time_to_next_loop_start(self):
-        return self.start_time + self.loop_time - time.time()
+        t = self.start_time + self.loop_time - time.time()
+        logging.debug('Time to next loop start = %.4f'%t)
+        return t
 
     def on_enter_pre_play(self):
         self.on_enter()
-
-        event = threading.Timer(self.time_to_next_loop_start() ,self.end_recording)
-        event.start()
-        self.scheduled_events.append(event)
-
-
         self.blink(self.play_led)
     
     def time_to_next_beat(self):
@@ -245,21 +251,17 @@ class Looper(object):
 
     def blink(self, led):
 
-        def start_blinking():
-            led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat-self.blink_on_time)
+        # def start_blinking():
+        #     led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat-self.blink_on_time)
+        # t = threading.Timer(self.time_to_next_beat() ,start_blinking)
+        # t.start()
+        # self.scheduled_events.append(t)
 
-        t = threading.Timer(self.time_to_next_beat() ,start_blinking)
-        t.start()
-        self.scheduled_events.append(t)
+        led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat-self.blink_on_time)
         
 
     def on_enter_pre_rec(self):
-        self.on_enter()
-        
-        event = threading.Timer(self.time_to_next_loop_start() ,self.start_recording)
-        event.start()
-        self.scheduled_events.append(event)
-        
+        self.on_enter()        
         self.blink(self.rec_led)
 
 if __name__ == "__main__":
