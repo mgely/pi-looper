@@ -15,9 +15,11 @@ logging.getLogger('transitions').setLevel(logging.INFO)
 
 
 
+
+
 class Looper(object):
 
-    states = ['rec', 'play', 'pre_rec', 'pre_play']
+    states = ['rec', 'play', 'pre_rec', 'pre_play','out_of_use']
 
     transitions = [
         # trigger                       # source        # destination
@@ -39,11 +41,21 @@ class Looper(object):
     def __init__(self):
         
         self.sample_rate = 44100
+        self.audio_out = sd.OutputStream(
+            samplerate=self.sample_rate,
+            channels = 2,
+            latency = 'high',
+            dtype='float32')
+        self.audio_out.start()
+
         self.n_loop = 0
         self.n_loop_previous = 0
         self.loops = []
 
-        self.machine = Machine(model = self,states = self.states, transitions = self.transitions, 
+        self.machine = Machine(
+            model = self,
+            states = self.states, 
+            transitions = self.transitions, 
             initial = 'play')
         self.init_hardware()
         self.init_timing()
@@ -52,6 +64,15 @@ class Looper(object):
         self.init_recording()
 
         self.loop_player()
+    
+    def __enter__(self):
+        return self
+
+    def __exit__(self ,type, value, traceback):
+        logging.debug('Stopping looper...')
+        sd.stop()
+        self.player_thread.cancel()
+        self.state = 'out_of_use'
 
     def update_loop(self):
         if self.n_loop > 0:
@@ -95,8 +116,10 @@ class Looper(object):
         
         # Start playing the updated loop
         logging.debug('Loop starting')
-        sd.stop()
-        sd.play(self.loop,samplerate=self.sample_rate)
+        # sd.stop()
+        # sd.play(self.loop,samplerate=self.sample_rate, latency = 'high')
+        self.audio_out.write(self.loop)
+        
 
         # Schedule the loop to play in a loop-durations time
         self.player_thread = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
@@ -129,7 +152,7 @@ class Looper(object):
         
         metronome_file = self.src_directory+'data/high_hat_001.wav'
         # Extract data and sampling rate from file
-        metronome_sound, metronome_sr = sf.read(metronome_file)
+        metronome_sound, metronome_sr = sf.read(metronome_file, dtype='float32')
         if metronome_sr != self.sample_rate:
             raise RuntimeError('Wrong metronome sample rate: %d instead of %d'%(metronome_sr,self.sample_rate))
         
@@ -200,7 +223,7 @@ class Looper(object):
         # Extract audio
         loop_filename = self.loop_filename.format(self.n_loop)
         shutil.copyfile(self.temp_recording_filename, loop_filename)
-        sound, sr = sf.read(loop_filename)
+        sound, sr = sf.read(loop_filename, dtype='float32')
 
         # Round the number of samples to the nearest number of bars
         n_samples_in_loop = round(float(len(sound))/float(self.samples_per_beat*4))*self.samples_per_beat*4
@@ -265,6 +288,7 @@ class Looper(object):
         self.blink(self.rec_led)
 
 if __name__ == "__main__":
-    l = Looper()    
-    while True:
-        time.sleep(l.timing_precision)
+    with Looper() as l:
+        time.sleep(0.3)
+    # while True:
+    #     time.sleep(l.timing_precision)
