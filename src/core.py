@@ -14,7 +14,23 @@ logging.basicConfig(level=logging.DEBUG,format='(%(threadName)-10s) %(message)s'
 logging.getLogger('transitions').setLevel(logging.INFO)
 
 
+def run_looper(looper_running_flag):
+    active_looper = Looper()
+    while looper_running_flag:
+        time.sleep(active_looper.timing_precision)
 
+class LooperManager(object):
+
+    def __init__(self):
+        self.start_running_looper()
+    
+    def start_running_looper(self):
+        self.looper_running_flag = threading.Event()
+        self.looper_thread = threading.Thread(name='looper',
+                      target=run_looper,
+                      args=(self.looper_running_flag,),
+                      daemon = True)
+        self.looper_thread.start()
 
 
 class Looper(object):
@@ -41,7 +57,7 @@ class Looper(object):
     def __init__(self):
         
         self.sample_rate = 44100
-        self.latency = 45e-3 # seconds (half of what is measured in the test_latency script)
+        self.latency = 50e-3 # seconds (half of what is measured in the test_latency script)
         self.latency_samples = int(float(self.latency)*float(self.sample_rate))
         self.audio_out = sd.OutputStream(
             samplerate=self.sample_rate,
@@ -65,6 +81,7 @@ class Looper(object):
         self.init_metronome()
         self.init_recording()
 
+        self.update_loop()
         self.loop_player()
     
     def __enter__(self):
@@ -79,13 +96,13 @@ class Looper(object):
     def update_loop(self):
         if self.n_loop > 0:
             if self.n_loop != self.n_loop_previous:
-                logging.debug('Updating loop...')
+                # logging.debug('Updating loop...')
                 self.n_loop_previous = self.n_loop
 
                 loop_lengths = [len(l) for l in self.loops[:self.n_loop]]
                 loop_n_samples = round(max(loop_lengths)/self.samples_per_beat)*self.samples_per_beat
 
-                self.loop = np.zeros((loop_n_samples,2), dtype = 'float32')
+                loop = np.zeros((loop_n_samples,2), dtype = 'float32')
                 for l in self.loops:
                     l = np.tile(l,(round(loop_n_samples/len(l)),1))
   
@@ -93,24 +110,18 @@ class Looper(object):
                     l = l[self.latency_samples:]
 
                     if len(l) > loop_n_samples:
-                        self.loop += l[:loop_n_samples]
+                        loop += l[:loop_n_samples]
                     else:
-                        self.loop[:len(l)] += l
-                logging.debug('Loop updated.')
+                        loop[:len(l)] += l
+                self.loop = loop
         else:
             self.loop = self.metronome_loop
 
         self.loop_time = float(len(self.loop))/float(self.sample_rate)
-        logging.debug('Loop duration = %.2f s'%self.loop_time)
+        logging.debug('Loop time:\n\t\t\t\t\t %.0f s'%(self.loop_time))
 
     def loop_player(self):
-
-        # At beginning of loop, exit pre- states
-        if self.state == 'pre_rec':
-            self.start_recording()
-        elif self.state == 'pre_play':
-            self.end_recording()
-
+        
         # Set beginning of loop time
         # Important: should always be before the loop
         # is updated.
@@ -120,19 +131,22 @@ class Looper(object):
         else:
             self.start_time += self.loop_time
 
-        # Append the loop with new recordings
-        self.update_loop()
-        
-        # Start playing the updated loop
-        logging.debug('Loop starting')
-        # sd.stop()
-        # sd.play(self.loop,samplerate=self.sample_rate, latency = 'high')
-        self.audio_out.stop()
-        self.audio_out.start()
-        self.audio_out.write(self.loop)
-        
+        # At beginning of loop, exit pre- states
+        if self.state == 'pre_rec':
+            self.start_recording()
+            t = threading.Timer(self.time_to_next_loop_start()/2,self.half_end_recording)
+            t.start()
+            self.audio_out.write(self.loop)
 
-        # Schedule the loop to play in a loop-durations time
+        elif self.state == 'pre_play':
+            t = threading.Timer(0,self.end_recording)
+            t.start()
+            self.audio_out.write(self.half_loop)
+            self.audio_out.write(self.loop[len(self.half_loop):])
+        else:
+            self.audio_out.write(self.loop)
+
+        # Schedule this function to play in a loop-durations time
         self.player_thread = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
         self.player_thread.start()
 
@@ -182,7 +196,6 @@ class Looper(object):
         self.samples_per_beat = int(self.sample_rate*self.seconds_per_beat)
         self.start_time = None
         self.timing_precision = 0.3e-3 # half a milisecond
-        # TODO: deal with latency
 
 
     def init_hardware(self):
@@ -228,24 +241,35 @@ class Looper(object):
     def end_recording(self):
         self.record_flag.clear()
         self.add_recording_to_loops()
+        self.update_loop()
         self.trigger('end_recording')
+
+    def half_end_recording(self):
+        sound, sr = sf.read(self.temp_recording_filename, dtype='float32')
+        n_samples_half_loop = int(len(self.loop)/2)
+        self.half_loop = self.loop[:n_samples_half_loop]
+
+        l = sound[self.latency_samples:]
+
+        if len(l) > n_samples_half_loop:
+            self.half_loop += l[:n_samples_half_loop]
+        else:
+            self.half_loop[:len(l)] += l
 
     def add_recording_to_loops(self):
         # Extract audio
         loop_filename = self.loop_filename.format(self.n_loop)
+        ts = time.time()
         shutil.copyfile(self.temp_recording_filename, loop_filename)
+        te = time.time()
+        logging.debug('Copying file took:\n\t\t\t\t\t %.0f ms'%((te-ts)*1e3))
+
+        ts = time.time()
         sound, sr = sf.read(loop_filename, dtype='float32')
-
-        # Round the number of samples to the nearest number of bars
-        n_samples_in_loop = round(float(len(sound))/float(self.samples_per_beat*4))*self.samples_per_beat*4
-
-        if len(sound) > n_samples_in_loop:
-            loop = sound[:n_samples_in_loop]
-        else: 
-            loop = np.zeros((n_samples_in_loop,2), dtype = 'float32')
-            loop[:len(sound)] = sound
-        
-        self.loops.append(loop)
+        te = time.time()
+        logging.debug('Reading file took:\n\t\t\t\t\t %.0f ms'%((te-ts)*1e3))
+       
+        self.loops.append(sound)
         self.n_loop += 1
 
 
@@ -301,6 +325,13 @@ class Looper(object):
 if __name__ == "__main__":
     # with Looper() as l:
     #     time.sleep(0.3)
-    l = Looper()
+
+    # l = Looper()
+    # time.sleep(1)
+    # l.release_rec_button()
+    # time.sleep(2)
+    # l.add_recording_to_loops()
+
+    lm = LooperManager()
     while True:
-        time.sleep(l.timing_precision)
+        time.sleep(1) 

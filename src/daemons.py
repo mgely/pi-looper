@@ -43,7 +43,7 @@ def recorder(recording_flag, timing_precision, filename):
                 while recording_flag.isSet():
                     file.write(q.get()) # Adds audio to the file
                 file.flush() # Add any unwritten audio to the file
-                logging.debug('not recording')
+                # logging.debug('not recording')
                 while not recording_flag.isSet():
                     time.sleep(timing_precision)
-                logging.debug('recording')
+                # logging.debug('recording')
