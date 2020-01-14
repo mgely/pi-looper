@@ -10,6 +10,7 @@ import sounddevice as sd
 import numpy as np
 import daemons
 import logging
+from copy import deepcopy
 logging.basicConfig(level=logging.DEBUG,format='(%(threadName)-10s) %(message)s')
 logging.getLogger('transitions').setLevel(logging.INFO)
 
@@ -134,7 +135,7 @@ class Looper(object):
         # At beginning of loop, exit pre- states
         if self.state == 'pre_rec':
             self.start_recording()
-            t = threading.Timer(self.time_to_next_loop_start()/2,self.half_end_recording)
+            t = threading.Timer(self.loop_time/2+self.timing_precision,self.half_end_recording)
             t.start()
             self.audio_out.write(self.loop)
 
@@ -247,7 +248,7 @@ class Looper(object):
     def half_end_recording(self):
         sound, sr = sf.read(self.temp_recording_filename, dtype='float32')
         n_samples_half_loop = int(len(self.loop)/2)
-        self.half_loop = self.loop[:n_samples_half_loop]
+        self.half_loop = deepcopy(self.loop[:n_samples_half_loop])
 
         l = sound[self.latency_samples:]
 
