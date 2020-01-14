@@ -10,9 +10,7 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np # Make sure NumPy is loaded before it is used in the callback
 assert np  # avoid "imported but unused" message (W0611)
-
-device_info = sd.query_devices(None, 'input')
-samplerate = int(device_info['default_samplerate'])
+sample_rate = 44100
 
 def recorder(recording_flag, timing_precision, filename):
     """
@@ -33,8 +31,8 @@ def recorder(recording_flag, timing_precision, filename):
             print(status, file=sys.stderr)
         q.put(indata.copy())
 
-    with sf.SoundFile(filename, mode='x',channels = 2, samplerate=samplerate) as file:
-        with sd.InputStream(samplerate=samplerate,channels = 2,callback=callback, latency = 0.05, dtype='float32'):
+    with sf.SoundFile(filename, mode='x',channels = 2, samplerate=sample_rate) as file:
+        with sd.InputStream(samplerate=sample_rate,channels = 2,callback=callback, latency = 0.05, dtype='float32'):
             logging.debug('temporary file name: '+file.name)
             while True:
                 file.truncate(1) # Deletes contents of the file

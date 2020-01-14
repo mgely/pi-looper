@@ -16,7 +16,9 @@ logging.basicConfig(level=logging.DEBUG,format='(%(threadName)-10s) %(message)s'
 logging.getLogger('transitions').setLevel(logging.INFO)
 
 # Settings
+sample_rate = 44100
 timing_precision = 0.3e-3 # half a milisecond
+timing_precision_samples = int(timing_precision*sample_rate) # half a milisecond
 recording_directory = '/home/pi/Desktop/pi-looper-data/'
 
 # Initialize recording
@@ -32,7 +34,6 @@ recording_thread = threading.Thread(name='recorder',
 recording_thread.start()
 
 # setup audio
-sample_rate = 44100
 audio_out = sd.OutputStream(
     samplerate=sample_rate,
     channels = 2,
@@ -69,8 +70,8 @@ class LooperManager(object):
 
     transitions = [
         # trigger                       # source                # destination
-        ['hold_forw_back',              'looper_active',        'looper_inactive'],
-        ['release_play_button',         'looper_inactive',      'looper_active'],
+        ['hold_play',              'looper_active',        'looper_inactive'],
+        ['press_play_button',         'looper_inactive',      'looper_active'],
     ]
 
     def __init__(self):
@@ -92,23 +93,27 @@ class LooperManager(object):
 
         
     def setup_stop_button(self):
-        all_leds_off()
+        def check_if_hold_play():
+            def future_check_if_hold_play():
+                if play_button.is_active:
+                    self.trigger('hold_play')
 
-        def check_if_hold_forw_back():
-            def future_check_if_hold_forw_back():
-                if forw_button.is_active and back_button.is_active:
-                    self.trigger('hold_forw_back')
-
-            t = threading.Timer(1,future_check_if_hold_forw_back)
+            t = threading.Timer(1,future_check_if_hold_play)
             t.daemon = True
             t.start()
-        back_button.when_activated = check_if_hold_forw_back
+        play_button.when_activated = check_if_hold_play
         
     def setup_start_button(self):
-        play_button.when_deactivated = self.release_play_button
+        play_button.when_activated = self.press_play_button
         all_leds_off()
         # play_led.blink(on_time = 0.1, off_time= 0.4)
         play_led.on()
+
+    def press_play_button(self):
+        while play_button.is_active:
+            time.sleep(0.05)
+        time.sleep(0.05)
+        self.trigger('press_play_button')
 
     def on_enter_looper_active(self):
         self.start_running_looper()
@@ -158,10 +163,14 @@ class Looper(object):
             initial = 'metronome')
         self.init_hardware()
         self.init_files()
+        
+        self.bpm = 100
+        self.start_time = time.time()
+
+        self.init_metronome()
         self.start_metronome()
 
     def on_exit_metronome(self):
-        
         if len(self.metronome_sound) > self.samples_per_beat():
             self.metronome_loop = self.metronome_sound[:self.samples_per_beat()]
         else:
@@ -172,8 +181,10 @@ class Looper(object):
         self.metronome_loop = np.concatenate((self.metronome_loop,np.tile(self.metronome_loop/2,(3,1))))
 
         self.update_loop() # will set the loop to be the metronome loop
-        self.loop_player() # start playing the loop
-        play_led.on() # indicate that we are in playing mode
+        self.player_thread = threading.Timer(self.time_to_next_beat(), self.loop_player) # start playing the loop
+        self.player_thread.daemon = True
+        self.player_thread.start()
+        self.start_time = None # will be set properly and synced to loop
     
     def __enter__(self):
         return self
@@ -186,6 +197,7 @@ class Looper(object):
         record_flag.clear()
 
     def update_loop(self):
+        logging.debug('Updating loop ...')
         if self.n_loop > 0:
             if self.n_loop != self.n_loop_previous:
                 # logging.debug('Updating loop...')
@@ -207,16 +219,14 @@ class Looper(object):
                         loop[:len(l)] += l
                 self.loop = loop
         else:
-            self.loop = self.metronome_loop
+            logging.debug('Loop is just the metronome')
+            self.loop = deepcopy(self.metronome_loop)
 
         self.loop_time = float(len(self.loop))/float(sample_rate)
-        logging.debug('Loop time:\n\t\t\t\t\t %.0f s'%(self.loop_time))
+        logging.debug('Loop time:\n\t\t\t\t\t %.2f s'%(self.loop_time))
 
     def loop_player(self):
         
-        # Set beginning of loop time
-        # Important: should always be before the loop
-        # is updated.
         if self.start_time is None:
             self.start_time = time.time()
             logging.debug('Starting time set')
@@ -247,6 +257,8 @@ class Looper(object):
         self.player_thread.daemon = True
         self.player_thread.start()
 
+
+
     def init_files(self):
         
         self.repo_directory = '/home/pi/Desktop/pi-looper/'
@@ -258,18 +270,22 @@ class Looper(object):
         self.loop_filename = self.recording_directory+'loop_{:03d}.wav'
 
     def init_metronome(self):
-        self.bpm = 100
-    
+
         metronome_file = self.src_directory+'data/high_hat_001.wav'
         # Extract data and sampling rate from file
         self.metronome_sound, metronome_sr = sf.read(metronome_file, dtype='float32')
         if metronome_sr != sample_rate:
             raise RuntimeError('Wrong metronome sample rate: %d instead of %d'%(metronome_sr,sample_rate))
+        all_leds_off()
+        back_led.on()
+        forw_led.on()
     
     def start_metronome(self):
         if self.state == 'metronome':
-            audio_out.write(self.metronome_sound[:min(self.samples_per_beat(),len(self.metronome_sound))])
-            t = threading.Timer(self.seconds_per_beat(),self.start_metronome)
+            self.start_time = time.time()
+            audio_out.write(self.metronome_sound[:min(self.samples_per_beat(),len(self.metronome_sound))-timing_precision_samples])
+
+            t = threading.Timer(self.time_to_next_beat(),self.start_metronome)
             t.daemon = True
             t.start()
 
@@ -279,41 +295,34 @@ class Looper(object):
     def samples_per_beat(self):
         return int(sample_rate*self.seconds_per_beat())
 
-    def release_forw_button(self):
-        if self.state == 'metronome' and self.bpm < 250:
-            self.bpm += 2
-        else:
-            self.trigger('release_forw_button')
+    def press_forw_button(self):
+        if self.state == 'metronome':
+            while forw_button.is_active and self.bpm < 300:
+                back_led.off()
+                self.bpm += 2
+                logging.debug("bpm = %d"%self.bpm)
+                time.sleep(0.06)
+            back_led.on()
 
-    def release_back_button(self):
-        if self.state == 'metronome' and self.bpm > 40:
-            self.bpm -= 2
-        else:
-            self.trigger('release_back_button')
+    def press_back_button(self):
+        if self.state == 'metronome':
+            while back_button.is_active and self.bpm > 40:
+                forw_led.off()
+                self.bpm -= 2
+                logging.debug("bpm = %d"%self.bpm)
+                time.sleep(0.06)
+            forw_led.on()
 
     def init_hardware(self):
 
         # Button events
         rec_button.when_deactivated = self.release_rec_button
         play_button.when_deactivated = self.release_play_button
-        forw_button.when_deactivated = self.release_forw_button
         back_button.when_deactivated = self.release_back_button
+        forw_button.when_activated = self.press_forw_button
+        back_button.when_activated = self.press_back_button
 
         self.blink_on_time = 60./240. #seconds
-
-        # Check sample rates of input and output devices
-
-        device_info = sd.query_devices(None, 'input')
-        logging.debug(device_info)
-        samplerate_input = int(device_info['default_samplerate'])
-        if samplerate_input != sample_rate:
-            raise RuntimeError('Wrong input sample rate: %d instead of %d'%(samplerate_input,sample_rate))
-
-        device_info = sd.query_devices(None, 'output')
-        logging.debug(device_info)
-        samplerate_output = int(device_info['default_samplerate'])
-        if samplerate_output != sample_rate:
-            raise RuntimeError('Wrong ouptut sample rate: %d instead of %d'%(samplerate_output,sample_rate))
 
     def start_recording(self):
         record_flag.set()
@@ -368,8 +377,11 @@ class Looper(object):
     
     def time_to_next_loop_start(self):
         t = self.start_time + self.loop_time - time.time()
-        logging.debug('Time to next loop start = %.4f'%t)
+        logging.debug('Time to next loop start = %.1f ms'%(t*1e3))
         return t
+    
+    def time_to_next_beat(self):
+        t = self.start_time + self.seconds_per_beat - time.time()
 
     def on_enter_pre_play(self):
         self.on_enter()
