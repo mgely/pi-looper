@@ -124,9 +124,11 @@ class Looper(object):
 
     transitions = [
         # trigger                       # source        # destination
+        ['release_play_button',         'metronome',    'play'],
+        #
         ['release_rec_button',          'play',         'pre_rec'],
         #
-        ['start_recording',            'pre_rec',      'rec'],
+        ['start_recording',            'pre_rec',       'rec'],
         ['release_play_button',         'pre_rec',      'play'],
         ['release_back_button',         'pre_rec',      'play'],
         #
@@ -146,21 +148,32 @@ class Looper(object):
         
         self.n_loop = 0
         self.n_loop_previous = 0
+        self.start_time = None
         self.loops = []
 
         self.machine = Machine(
             model = self,
             states = self.states, 
             transitions = self.transitions, 
-            initial = 'play')
+            initial = 'metronome')
         self.init_hardware()
-        self.init_timing()
         self.init_files()
-        self.init_metronome()
+        self.start_metronome()
 
-        self.update_loop()
-        self.loop_player()
-        play_led.on()
+    def on_exit_metronome(self):
+        
+        if len(self.metronome_sound) > self.samples_per_beat():
+            self.metronome_loop = self.metronome_sound[:self.samples_per_beat()]
+        else:
+            self.metronome_loop = np.zeros((self.samples_per_beat(),2), dtype = 'float32')
+            self.metronome_loop[:len(self.metronome_sound)] = self.metronome_sound
+
+        # Make it 4/4
+        self.metronome_loop = np.concatenate((self.metronome_loop,np.tile(self.metronome_loop/2,(3,1))))
+
+        self.update_loop() # will set the loop to be the metronome loop
+        self.loop_player() # start playing the loop
+        play_led.on() # indicate that we are in playing mode
     
     def __enter__(self):
         return self
@@ -179,7 +192,7 @@ class Looper(object):
                 self.n_loop_previous = self.n_loop
 
                 loop_lengths = [len(l) for l in self.loops[:self.n_loop]]
-                loop_n_samples = round(max(loop_lengths)/self.samples_per_beat)*self.samples_per_beat
+                loop_n_samples = round(max(loop_lengths)/self.samples_per_beat())*self.samples_per_beat()
 
                 loop = np.zeros((loop_n_samples,2), dtype = 'float32')
                 for l in self.loops:
@@ -245,36 +258,46 @@ class Looper(object):
         self.loop_filename = self.recording_directory+'loop_{:03d}.wav'
 
     def init_metronome(self):
-        
+        self.bpm = 100
+    
         metronome_file = self.src_directory+'data/high_hat_001.wav'
         # Extract data and sampling rate from file
-        metronome_sound, metronome_sr = sf.read(metronome_file, dtype='float32')
+        self.metronome_sound, metronome_sr = sf.read(metronome_file, dtype='float32')
         if metronome_sr != sample_rate:
             raise RuntimeError('Wrong metronome sample rate: %d instead of %d'%(metronome_sr,sample_rate))
-        
-        if len(metronome_sound) > self.samples_per_beat:
-            self.metronome_loop = metronome_sound[:self.samples_per_beat]
+    
+    def start_metronome(self):
+        if self.state == 'metronome':
+            audio_out.write(self.metronome_sound[:min(self.samples_per_beat(),len(self.metronome_sound))])
+            t = threading.Timer(self.seconds_per_beat(),self.start_metronome)
+            t.daemon = True
+            t.start()
+
+    def seconds_per_beat(self):
+        return 60./float(self.bpm)
+    
+    def samples_per_beat(self):
+        return int(sample_rate*self.seconds_per_beat())
+
+    def release_forw_button(self):
+        if self.state == 'metronome' and self.bpm < 250:
+            self.bpm += 2
         else:
-            self.metronome_loop = np.zeros((self.samples_per_beat,2), dtype = 'float32')
-            self.metronome_loop[:len(metronome_sound)] = metronome_sound
+            self.trigger('release_forw_button')
 
-        # Make it 4/4
-        self.metronome_loop = np.concatenate((self.metronome_loop,np.tile(self.metronome_loop/2,(3,1))))
-
-    def init_timing(self):
-        self.bpm = 120
-        self.seconds_per_beat = 60./float(self.bpm)
-        self.samples_per_beat = int(sample_rate*self.seconds_per_beat)
-        self.start_time = None
-
+    def release_back_button(self):
+        if self.state == 'metronome' and self.bpm > 40:
+            self.bpm -= 2
+        else:
+            self.trigger('release_back_button')
 
     def init_hardware(self):
 
         # Button events
         rec_button.when_deactivated = self.release_rec_button
         play_button.when_deactivated = self.release_play_button
-        # forw_button.when_deactivated = self.release_forw_button
-        # back_button.when_deactivated = self.release_back_button
+        forw_button.when_deactivated = self.release_forw_button
+        back_button.when_deactivated = self.release_back_button
 
         self.blink_on_time = 60./240. #seconds
 
@@ -356,19 +379,12 @@ class Looper(object):
         
         t = self.start_time - time.time()
         while t < 0:
-            t += self.seconds_per_beat
+            t += self.seconds_per_beat()
         return t
         
 
     def blink(self, led):
-
-        # def start_blinking():
-        #     led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat-self.blink_on_time)
-        # t = threading.Timer(self.time_to_next_beat() ,start_blinking)
-        # t.start()
-        # self.scheduled_events.append(t)
-
-        led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat-self.blink_on_time)
+        led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat()-self.blink_on_time)
         
 
     def on_enter_pre_rec(self):
