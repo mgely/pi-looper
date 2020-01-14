@@ -16,6 +16,7 @@ logging.basicConfig(level=logging.DEBUG,format='(%(threadName)-10s) %(message)s'
 logging.getLogger('transitions').setLevel(logging.INFO)
 
 # Settings
+initial_bpm = 100
 sample_rate = 44100
 timing_precision = 0.3e-3 # half a milisecond
 timing_precision_samples = int(timing_precision*sample_rate) # half a milisecond
@@ -58,12 +59,6 @@ back_button = Button(15)
 forw_button = Button(25)
 
 
-def run_looper(looper_running_flag):
-    with Looper():
-        while looper_running_flag.isSet():
-            time.sleep(timing_precision)
-    logging.debug('Terminating looper')
-
 class LooperManager(object):
 
     states = ['looper_active', 'looper_inactive']
@@ -75,6 +70,7 @@ class LooperManager(object):
     ]
 
     def __init__(self):
+        self.bpm = initial_bpm
         self.machine = Machine(
             model = self,
             states = self.states, 
@@ -86,11 +82,16 @@ class LooperManager(object):
         self.looper_running_flag = threading.Event()
         self.looper_running_flag.set()
         self.looper_thread = threading.Thread(name='looper',
-                      target=run_looper,
+                      target=self.run_looper,
                       args=(self.looper_running_flag,),
                       daemon = True)
         self.looper_thread.start()
 
+    def run_looper(self,looper_running_flag):
+        with Looper(self):
+            while looper_running_flag.isSet():
+                time.sleep(timing_precision)
+        logging.debug('Terminating looper')
         
     def setup_stop_button(self):
         def check_if_hold_play():
@@ -146,7 +147,9 @@ class Looper(object):
         ['release_back_button',         'pre_play',     'play'], # didnt add current recording
     ]
 
-    def __init__(self):
+    def __init__(self, manager):
+
+        self.manager = manager
         
         self.latency = 50e-3 # seconds (half of what is measured in the test_latency script)
         self.latency_samples = int(float(self.latency)*float(sample_rate))
@@ -164,7 +167,6 @@ class Looper(object):
         self.init_hardware()
         self.init_files()
         
-        self.bpm = 100
         self.start_time = time.time()
 
         self.init_metronome()
@@ -290,26 +292,26 @@ class Looper(object):
             t.start()
 
     def seconds_per_beat(self):
-        return 60./float(self.bpm)
+        return 60./float(self.manager.bpm)
     
     def samples_per_beat(self):
         return int(sample_rate*self.seconds_per_beat())
 
     def press_forw_button(self):
         if self.state == 'metronome':
-            while forw_button.is_active and self.bpm < 300:
+            while forw_button.is_active and self.manager.bpm < 300:
                 back_led.off()
-                self.bpm += 2
-                logging.debug("bpm = %d"%self.bpm)
+                self.manager.bpm += 2
+                logging.debug("bpm = %d"%self.manager.bpm)
                 time.sleep(0.06)
             back_led.on()
 
     def press_back_button(self):
         if self.state == 'metronome':
-            while back_button.is_active and self.bpm > 40:
+            while back_button.is_active and self.manager.bpm > 40:
                 forw_led.off()
-                self.bpm -= 2
-                logging.debug("bpm = %d"%self.bpm)
+                self.manager.bpm -= 2
+                logging.debug("bpm = %d"%self.manager.bpm)
                 time.sleep(0.06)
             forw_led.on()
 
