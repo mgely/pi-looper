@@ -339,6 +339,11 @@ class Looper(object):
         n_samples_half_loop = int(len(self.loop)/2)
         self.half_loop = deepcopy(self.loop[:n_samples_half_loop])
 
+        # If this is the first recording, 
+        # we want to remove the metronome
+        if self.n_loop == 0:
+            self.half_loop *= 0
+
         l = sound[self.latency_samples:]
 
         if len(l) > n_samples_half_loop:
