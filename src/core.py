@@ -12,51 +12,24 @@ import daemons
 import logging
 from tempfile import gettempprefix
 from copy import deepcopy
-logging.basicConfig(level=logging.DEBUG,format='(%(threadName)-10s) %(message)s')
-logging.getLogger('transitions').setLevel(logging.INFO)
 
-# Settings
-initial_bpm = 100
-sample_rate = 44100
-timing_precision = 0.3e-3 # half a milisecond
-timing_precision_samples = int(timing_precision*sample_rate) # half a milisecond
-recording_directory = '/home/pi/Desktop/pi-looper-data/'
+# Setup logging
+logging_level = logging.DEBUG
+logging.basicConfig(
+    level=logging_level,
+    format='(%(threadName)-10s) %(message)s')
+logging.getLogger('transitions').setLevel(logging_level)
 
-# Initialize recording
-temp_recording_filename = os.path.join(recording_directory,'temp_recording_file.wav')
-
-record_flag = threading.Event()
-recording_thread = threading.Thread(name='recorder',
-                target=daemons.recorder,
-                args=(record_flag,
-                timing_precision,
-                temp_recording_filename),
-                daemon = True)
-recording_thread.start()
-
-# setup audio
-audio_out = sd.OutputStream(
-    samplerate=sample_rate,
-    channels = 2,
-    latency = 0.05,
-    dtype='float32')
-audio_out.start()
-
-# LEDs
-rec_led = LED(18)
-play_led = LED(8)
-back_led = LED(14)
-forw_led = LED(24)
-
-def all_leds_off():
-    for l in [rec_led,play_led,back_led,forw_led]:
-        l.off()
-
-# Buttons
-rec_button = Button(23)
-play_button = Button(7)
-back_button = Button(15)
-forw_button = Button(25)
+try:
+    # Cloud logging setup tutorial: https://cloud.google.com/logging/docs/setup/python
+    # Cloud log viewer: https://console.cloud.google.com/logs/viewer?project=pi-looper&folder&organizationId&minLogLevel=0&expandAll=false&timestamp=2020-05-03T12:19:47.706000000Z&customFacets=&limitCustomFacetWidth=true&dateRangeStart=2020-05-03T11:19:22.962Z&interval=PT1H&resource=global&scrollTimestamp=2020-05-03T12:17:23.829686000Z&dateRangeUnbound=forwardInTime
+    import google.cloud.logging # Don't conflict with standard logging
+    from google.cloud.logging.handlers import CloudLoggingHandler, setup_logging
+    client = google.cloud.logging.Client()
+    handler = CloudLoggingHandler(client)
+    setup_logging(handler)
+except Exception as e:
+    logging.warning('Setting up cloud logging failed with error:\n%s'%str(e))
 
 
 class LooperManager(object):
@@ -70,6 +43,7 @@ class LooperManager(object):
     ]
 
     def __init__(self):
+        
         self.bpm = initial_bpm
         self.machine = Machine(
             model = self,
@@ -412,6 +386,57 @@ class Looper(object):
 
 
 if __name__ == "__main__":
-    lm = LooperManager()
-    while True:
-        time.sleep(1) 
+    try:
+        
+        # Settings
+        initial_bpm = 100
+        sample_rate = 44100
+        timing_precision = 0.3e-3 # half a milisecond
+        timing_precision_samples = int(timing_precision*sample_rate) # half a milisecond
+        recording_directory = '/home/pi/Desktop/pi-looper-data/'
+
+        # Initialize recording
+        temp_recording_filename = os.path.join(
+            recording_directory,
+            'temp_recording_file.wav')
+
+        record_flag = threading.Event()
+        recording_thread = threading.Thread(name='recorder',
+                        target=daemons.recorder,
+                        args=(record_flag,
+                        timing_precision,
+                        temp_recording_filename),
+                        daemon = True)
+        recording_thread.start()
+
+        # setup audio
+        audio_out = sd.OutputStream(
+            samplerate=sample_rate,
+            channels = 2,
+            latency = 0.05,
+            dtype='float32')
+        audio_out.start()
+
+        # LEDs
+        rec_led = LED(18)
+        play_led = LED(8)
+        back_led = LED(14)
+        forw_led = LED(24)
+
+        def all_leds_off():
+            for l in [rec_led,play_led,back_led,forw_led]:
+                l.off()
+
+        # Buttons
+        rec_button = Button(23)
+        play_button = Button(7)
+        back_button = Button(15)
+        forw_button = Button(25)
+
+        lm = LooperManager()
+
+        while True:
+            time.sleep(1) 
+
+    except Exception as e:
+        logging.critical(str(e))
