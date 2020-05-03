@@ -42,78 +42,14 @@ try:
 except Exception as e:
     logging.warning('Setting up cloud logging failed with error:\n%s'%str(e))
 
-class LooperManager(object):
-
-    states = ['looper_active', 'looper_inactive']
-
-    transitions = [
-        # trigger                       # source                # destination
-        ['hold_play',              'looper_active',        'looper_inactive'],
-        ['press_play_button',         'looper_inactive',      'looper_active'],
-    ]
-
-    def __init__(self):
-        
-        self.bpm = initial_bpm
-        self.machine = Machine(
-            model = self,
-            states = self.states, 
-            transitions = self.transitions, 
-            initial = 'looper_active')
-        self.on_enter_looper_active()
-    
-    def start_running_looper(self):
-        self.looper_running_flag = threading.Event()
-        self.looper_running_flag.set()
-        self.looper_thread = threading.Thread(name='looper',
-                    target=self.run_looper,
-                    args=(self.looper_running_flag,),
-                    daemon = False)
-        self.looper_thread.start()
-
-    def run_looper(self,looper_running_flag):
-        with Looper(self):
-            while looper_running_flag.isSet():
-                time.sleep(timing_precision)
-        logging.debug('Terminating looper')
-        
-    def setup_stop_button(self):
-        def check_if_hold_play():
-            def future_check_if_hold_play():
-                if play_button.is_active:
-                    self.trigger('hold_play')
-
-            t = threading.Timer(1,future_check_if_hold_play)
-            t.daemon = False
-            t.start()
-        play_button.when_activated = check_if_hold_play
-        
-    def setup_start_button(self):
-        play_button.when_activated = self.press_play_button
-        all_leds_off()
-        # play_led.blink(on_time = 0.1, off_time= 0.4)
-        play_led.on()
-
-    def press_play_button(self):
-        while play_button.is_active:
-            time.sleep(0.05)
-        time.sleep(0.05)
-        self.trigger('press_play_button')
-
-    def on_enter_looper_active(self):
-        self.start_running_looper()
-        self.setup_stop_button()
-
-    def on_enter_looper_inactive(self):
-        self.looper_running_flag.clear()
-        self.setup_start_button()
-
 class Looper(object):
 
-    states = ['rec', 'play', 'pre_rec', 'pre_play','out_of_use']
+    states = ['rec', 'play', 'pre_rec', 'pre_play','pause','metronome']
 
     transitions = [
         # trigger                       # source        # destination
+        ['release_play_button',         'init',         'metronome'],
+        #
         ['release_play_button',         'metronome',    'play'],
         #
         ['release_rec_button',          'play',         'pre_rec'],
@@ -131,9 +67,8 @@ class Looper(object):
         ['release_back_button',         'pre_play',     'play'], # didnt add current recording
     ]
 
-    def __init__(self, manager):
+    def __init__(self):
 
-        self.manager = manager
         
         self.latency = 50e-3 # seconds (half of what is measured in the test_latency script)
         self.latency_samples = int(float(self.latency)*float(sample_rate))
@@ -147,13 +82,18 @@ class Looper(object):
             model = self,
             states = self.states, 
             transitions = self.transitions, 
-            initial = 'metronome')
+            initial = 'init')
         self.init_hardware()
         self.init_files()
-        
         self.start_time = time.time()
-
         self.init_metronome()
+        play_led.on()
+
+    def on_enter_metronome(self):
+        self.on_enter()
+
+        back_led.on()
+        forw_led.on()
         self.start_metronome()
 
     def on_exit_metronome(self):
@@ -171,16 +111,7 @@ class Looper(object):
         self.player_thread.daemon = False
         self.player_thread.start()
         self.start_time = None # will be set properly and synced to loop
-    
-    def __enter__(self):
-        return self
 
-    def __exit__(self ,type, value, traceback):
-        logging.debug('Stopping looper...')
-        self.state = 'out_of_use'
-        audio_out.stop()
-        audio_out.start()
-        record_flag.clear()
 
     def update_loop(self):
         logging.debug('Updating loop ...')
@@ -233,8 +164,6 @@ class Looper(object):
             t.start()
             audio_out.write(self.half_loop)
             audio_out.write(self.loop[len(self.half_loop):])
-        elif self.state == 'out_of_use':
-            return
         else:
             audio_out.write(self.loop)
 
@@ -256,15 +185,12 @@ class Looper(object):
         self.loop_filename = self.recording_directory+'loop_{:03d}.wav'
 
     def init_metronome(self):
-
+        self.bpm = initial_bpm
         metronome_file = self.src_directory+'data/high_hat_001.wav'
         # Extract data and sampling rate from file
         self.metronome_sound, metronome_sr = sf.read(metronome_file, dtype='float32')
         if metronome_sr != sample_rate:
             raise RuntimeError('Wrong metronome sample rate: %d instead of %d'%(metronome_sr,sample_rate))
-        all_leds_off()
-        back_led.on()
-        forw_led.on()
     
     def start_metronome(self):
         if self.state == 'metronome':
@@ -276,26 +202,26 @@ class Looper(object):
             t.start()
 
     def seconds_per_beat(self):
-        return 60./float(self.manager.bpm)
+        return 60./float(self.bpm)
     
     def samples_per_beat(self):
         return int(sample_rate*self.seconds_per_beat())
 
     def press_forw_button(self):
         if self.state == 'metronome':
-            while forw_button.is_active and self.manager.bpm < 300:
+            while forw_button.is_active and self.bpm < 300:
                 back_led.off()
-                self.manager.bpm += 2
-                logging.debug("bpm = %d"%self.manager.bpm)
+                self.bpm += 2
+                logging.debug("bpm = %d"%self.bpm)
                 time.sleep(0.06)
             back_led.on()
 
     def press_back_button(self):
         if self.state == 'metronome':
-            while back_button.is_active and self.manager.bpm > 40:
+            while back_button.is_active and self.bpm > 40:
                 forw_led.off()
-                self.manager.bpm -= 2
-                logging.debug("bpm = %d"%self.manager.bpm)
+                self.bpm -= 2
+                logging.debug("bpm = %d"%self.bpm)
                 time.sleep(0.06)
             forw_led.on()
 
@@ -462,7 +388,8 @@ if __name__ == "__main__":
             dtype='float32')
         audio_out.start()
         time.sleep(0.5)
-        lm = LooperManager()
+
+        Looper()
         while not is_all_buttons_active():
             time.sleep(1)
 
