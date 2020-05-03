@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 from gpiozero import LED, Button
 import time
@@ -13,12 +14,22 @@ import logging
 from tempfile import gettempprefix
 from copy import deepcopy
 
+def restart_program(): 
+    python = sys.executable
+    os.execl(python, python, * sys.argv) 
+
 # Setup logging
 logging_level = logging.DEBUG
 logging.basicConfig(
     level=logging_level,
     format='(%(threadName)-10s) %(message)s')
 logging.getLogger('transitions').setLevel(logging_level)
+
+# Log all uncaught exceptions too
+def my_handler(type, value, tb):
+    logger.exception("Uncaught exception: {0}".format(str(value)))
+sys.excepthook = my_handler
+        
 
 try:
     # Cloud logging setup tutorial: https://cloud.google.com/logging/docs/setup/python
@@ -30,7 +41,6 @@ try:
     setup_logging(handler)
 except Exception as e:
     logging.warning('Setting up cloud logging failed with error:\n%s'%str(e))
-
 
 class LooperManager(object):
 
@@ -56,9 +66,9 @@ class LooperManager(object):
         self.looper_running_flag = threading.Event()
         self.looper_running_flag.set()
         self.looper_thread = threading.Thread(name='looper',
-                      target=self.run_looper,
-                      args=(self.looper_running_flag,),
-                      daemon = True)
+                    target=self.run_looper,
+                    args=(self.looper_running_flag,),
+                    daemon = False)
         self.looper_thread.start()
 
     def run_looper(self,looper_running_flag):
@@ -74,7 +84,7 @@ class LooperManager(object):
                     self.trigger('hold_play')
 
             t = threading.Timer(1,future_check_if_hold_play)
-            t.daemon = True
+            t.daemon = False
             t.start()
         play_button.when_activated = check_if_hold_play
         
@@ -158,7 +168,7 @@ class Looper(object):
 
         self.update_loop() # will set the loop to be the metronome loop
         self.player_thread = threading.Timer(self.time_to_next_beat(), self.loop_player) # start playing the loop
-        self.player_thread.daemon = True
+        self.player_thread.daemon = False
         self.player_thread.start()
         self.start_time = None # will be set properly and synced to loop
     
@@ -185,7 +195,7 @@ class Looper(object):
                 loop = np.zeros((loop_n_samples,2), dtype = 'float32')
                 for l in self.loops:
                     l = np.tile(l,(round(loop_n_samples/len(l)),1))
-  
+
                     # Adjust for latency
                     l = l[self.latency_samples:]
 
@@ -213,13 +223,13 @@ class Looper(object):
         if self.state == 'pre_rec':
             self.start_recording()
             t = threading.Timer(self.loop_time/2+timing_precision,self.half_end_recording)
-            t.daemon = True
+            t.daemon = False
             t.start()
             audio_out.write(self.loop)
 
         elif self.state == 'pre_play':
             t = threading.Timer(0,self.end_recording)
-            t.daemon = True
+            t.daemon = False
             t.start()
             audio_out.write(self.half_loop)
             audio_out.write(self.loop[len(self.half_loop):])
@@ -230,7 +240,7 @@ class Looper(object):
 
         # Schedule this function to play in a loop-durations time
         self.player_thread = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
-        self.player_thread.daemon = True
+        self.player_thread.daemon = False
         self.player_thread.start()
 
 
@@ -262,7 +272,7 @@ class Looper(object):
             audio_out.write(self.metronome_sound[:min(self.samples_per_beat(),len(self.metronome_sound))-timing_precision_samples])
 
             t = threading.Timer(self.time_to_next_beat(),self.start_metronome)
-            t.daemon = True
+            t.daemon = False
             t.start()
 
     def seconds_per_beat(self):
@@ -339,7 +349,7 @@ class Looper(object):
         sound, sr = sf.read(loop_filename, dtype='float32')
         te = time.time()
         logging.debug('Reading file took:\n\t\t\t\t\t %.0f ms'%((te-ts)*1e3))
-       
+    
         self.loops.append(sound)
         self.n_loop += 1
 
@@ -384,16 +394,51 @@ class Looper(object):
         self.on_enter()        
         self.blink(rec_led)
 
+def all_leds_off():
+    for l in [rec_led,play_led,back_led,forw_led]:
+        l.off()
+def led_square():
+    all_leds_off()
+    for l in [rec_led,forw_led,play_led,back_led]:
+        l.on()
+        time.sleep(0.1)
+        l.off()
+def led_square():
+    all_leds_off()
+    for l in [rec_led,play_led,forw_led,back_led]:
+        l.on()
+        time.sleep(0.1)
+        l.off()
 
 if __name__ == "__main__":
     try:
-        
         # Settings
         initial_bpm = 100
         sample_rate = 44100
         timing_precision = 0.3e-3 # half a milisecond
         timing_precision_samples = int(timing_precision*sample_rate) # half a milisecond
         recording_directory = '/home/pi/Desktop/pi-looper-data/'
+
+        # LEDs
+        rec_led = LED(18)
+        play_led = LED(8)
+        back_led = LED(14)
+        forw_led = LED(24)
+        
+        # Buttons
+        rec_button = Button(23)
+        play_button = Button(7)
+        back_button = Button(15)
+        forw_button = Button(25)
+        
+        led_square()
+
+        def is_all_buttons_active():
+            for b in [rec_button,play_button,back_button,forw_button]:
+                if not b.is_active:
+                    return False
+            return True
+
 
         # Initialize recording
         temp_recording_filename = os.path.join(
@@ -406,7 +451,7 @@ if __name__ == "__main__":
                         args=(record_flag,
                         timing_precision,
                         temp_recording_filename),
-                        daemon = True)
+                        daemon = False)
         recording_thread.start()
 
         # setup audio
@@ -416,27 +461,29 @@ if __name__ == "__main__":
             latency = 0.05,
             dtype='float32')
         audio_out.start()
-
-        # LEDs
-        rec_led = LED(18)
-        play_led = LED(8)
-        back_led = LED(14)
-        forw_led = LED(24)
-
-        def all_leds_off():
-            for l in [rec_led,play_led,back_led,forw_led]:
-                l.off()
-
-        # Buttons
-        rec_button = Button(23)
-        play_button = Button(7)
-        back_button = Button(15)
-        forw_button = Button(25)
-
+        time.sleep(0.5)
         lm = LooperManager()
+        while not is_all_buttons_active():
+            time.sleep(1)
 
-        while True:
-            time.sleep(1) 
+        logging.info('User restarted the looper')
+        restart_program()
 
+    except sd.PortAudioError as e:
+        logging.critical('Audio interface issue:\n%s'%str(e))
+        # Indicate the error with LEDs
+        all_leds_off()
+        rec_led.blink(1,1)
+        forw_led.blink(1,1)
+    
     except Exception as e:
-        logging.critical(str(e))
+        logging.critical(e)
+        # Indicate the error with LEDs
+        all_leds_off()
+        rec_led.blink(1,1)
+        forw_led.blink(1,1)
+        back_led.blink(1,1)
+
+    while not is_all_buttons_active():
+        time.sleep(1)
+    restart_program()
