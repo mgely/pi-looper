@@ -32,16 +32,16 @@ def my_handler(type, value, tb):
 sys.excepthook = my_handler
         
 
-try:
-    # Cloud logging setup tutorial: https://cloud.google.com/logging/docs/setup/python
-    # Cloud log viewer: https://console.cloud.google.com/logs/viewer?project=pi-looper&folder&organizationId&minLogLevel=0&expandAll=false&timestamp=2020-05-03T12:19:47.706000000Z&customFacets=&limitCustomFacetWidth=true&dateRangeStart=2020-05-03T11:19:22.962Z&interval=PT1H&resource=global&scrollTimestamp=2020-05-03T12:17:23.829686000Z&dateRangeUnbound=forwardInTime
-    import google.cloud.logging # Don't conflict with standard logging
-    from google.cloud.logging.handlers import CloudLoggingHandler, setup_logging
-    client = google.cloud.logging.Client()
-    handler = CloudLoggingHandler(client)
-    setup_logging(handler)
-except Exception as e:
-    logging.warning('Setting up cloud logging failed with error:\n%s'%str(e))
+# try:
+#     # Cloud logging setup tutorial: https://cloud.google.com/logging/docs/setup/python
+#     # Cloud log viewer: https://console.cloud.google.com/logs/viewer?project=pi-looper&folder&organizationId&minLogLevel=0&expandAll=false&timestamp=2020-05-03T12:19:47.706000000Z&customFacets=&limitCustomFacetWidth=true&dateRangeStart=2020-05-03T11:19:22.962Z&interval=PT1H&resource=global&scrollTimestamp=2020-05-03T12:17:23.829686000Z&dateRangeUnbound=forwardInTime
+#     import google.cloud.logging # Don't conflict with standard logging
+#     from google.cloud.logging.handlers import CloudLoggingHandler, setup_logging
+#     client = google.cloud.logging.Client()
+#     handler = CloudLoggingHandler(client)
+#     setup_logging(handler)
+# except Exception as e:
+#     logging.warning('Setting up cloud logging failed with error:\n%s'%str(e))
 
 class Looper(object):
 
@@ -123,23 +123,23 @@ class Looper(object):
         logging.debug('Updating loop ...')
         if self.n_loop > 0:
             if self.n_loop != self.n_loop_previous:
-                # logging.debug('Updating loop...')
+                
                 self.n_loop_previous = self.n_loop
 
                 loop_lengths = [len(l) for l in self.loops[:self.n_loop]]
+                
+                # Round the longest loop to a certain number of beats
                 loop_n_samples = round(max(loop_lengths)/self.samples_per_beat())*self.samples_per_beat()
 
                 loop = np.zeros((loop_n_samples,2), dtype = 'float32')
                 for l in self.loops:
-                    l = np.tile(l,(round(loop_n_samples/len(l)),1))
 
-                    # Adjust for latency
-                    l = l[self.latency_samples:]
+                    # Adjust for latency, add fade in/out
+                    l = self.trim(l)
 
-                    if len(l) > loop_n_samples:
-                        loop += l[:loop_n_samples]
-                    else:
-                        loop[:len(l)] += l
+                    # stitch N versions of the sample together and add to master loop
+                    loop += np.tile(l,(round(loop_n_samples/len(l)),1))
+
                 self.loop = loop
         else:
             logging.debug('Loop is just the metronome')
@@ -147,6 +147,33 @@ class Looper(object):
 
         self.loop_time = float(len(self.loop))/float(sample_rate)
         logging.debug('Loop time:\n\t\t\t\t\t %.2f s'%(self.loop_time))
+
+    def trim(self, loop):
+
+        # Number of samples there should be in this loop
+        loop_n_samples = round(len(loop)/self.samples_per_beat())*self.samples_per_beat()
+
+        # Empty loop of the proper size
+        trimmed_loop = np.zeros((loop_n_samples,2))
+
+        # Adjust for latency
+        if loop_n_samples>len(loop)-self.latency_samples:
+            trimmed_loop[:len(loop)-self.latency_samples] += loop[self.latency_samples:len(loop)]
+        else:
+            trimmed_loop += loop[self.latency_samples:loop_n_samples+self.latency_samples]
+
+        # Fade in/out
+        return self.fade(trimmed_loop)
+
+    def fade(self,loop, where = ['in','out']):
+        fade_samples = int(fade_time*sample_rate)
+        if 'in' in where:
+            for i in range(fade_samples):
+                loop[i]*=i/fade_samples
+        elif 'out' in where:
+            for i in range(fade_samples):
+                loop[loop_n_samples-1-i]*=i/fade_samples
+        return loop
 
     def loop_player(self):
         
@@ -169,7 +196,7 @@ class Looper(object):
             t.daemon = False
             t.start()
             audio_out.write(self.half_loop)
-            audio_out.write(self.loop[len(self.half_loop):])
+            audio_out.write(self.fade(self.loop[len(self.half_loop):],'in'))
         else:
             audio_out.write(self.loop)
 
@@ -200,7 +227,6 @@ class Looper(object):
             raise RuntimeError('Wrong metronome sample rate: %d instead of %d'%(metronome_sr,sample_rate))
     
     def start_metronome(self):
-        print(self.beat)
         if self.state == 'metronome' or (self.state=='pre_rec' and self.beat in [0,1,2]):
 
             self.beat = (self.beat +1) %4
@@ -278,12 +304,8 @@ class Looper(object):
         if self.n_loop == 0:
             self.half_loop *= 0
 
-        l = sound[self.latency_samples:]
+        self.half_loop += self.trim(sound[:n_samples_half_loop+self.latency_samples])
 
-        if len(l) > n_samples_half_loop:
-            self.half_loop += l[:n_samples_half_loop]
-        else:
-            self.half_loop[:len(l)] += l
 
     def add_recording_to_loops(self):
         # Extract audio
@@ -359,6 +381,7 @@ if __name__ == "__main__":
         initial_bpm = 100
         sample_rate = 44100
         timing_precision = 0.3e-3 # half a milisecond
+        fade_time = 1 # seconds
         timing_precision_samples = int(timing_precision*sample_rate) # half a milisecond
         recording_directory = '/home/pi/Desktop/pi-looper-data/'
 
