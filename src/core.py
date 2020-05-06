@@ -13,6 +13,17 @@ import daemons
 import logging
 from tempfile import gettempprefix
 from copy import deepcopy
+from functools import wraps
+def timing(f):
+    @wraps(f)
+    def wrap(*args, **kw):
+        ts = time.time()
+        result = f(*args, **kw)
+        te = time.time()
+        logging.debug('func:%r took: %.0f ms' % \
+          (f.__name__, (te-ts)*1e3))
+        return result
+    return wrap
 
 def restart_program(): 
     led_circle()
@@ -92,6 +103,14 @@ class Looper(object):
         led_square()
         play_led.on()
 
+        # TODO: move this to a better place
+        self.fade_samples = int(fade_time*sample_rate)
+        self.fadein_mask = np.ones((self.fade_samples,2))
+        self.fadeout_mask = np.ones((self.fade_samples,2))
+        for i in range(self.fade_samples):
+            self.fadein_mask[i]*=i/self.fade_samples
+            self.fadeout_mask[-1-i]*=i/self.fade_samples
+
     def on_enter_metronome(self):
         self.on_enter()
 
@@ -118,7 +137,7 @@ class Looper(object):
         self.player_thread.daemon = False
         self.player_thread.start()
 
-
+    @timing
     def update_loop(self):
         logging.debug('Updating loop ...')
         if self.n_loop > 0:
@@ -134,45 +153,46 @@ class Looper(object):
                 loop = np.zeros((loop_n_samples,2), dtype = 'float32')
                 for l in self.loops:
 
-                    # Adjust for latency, add fade in/out
+                    # trim
                     l = self.trim(l)
+                    # fade in/out
+                    l = self.fade(l)
 
                     # stitch N versions of the sample together and add to master loop
                     loop += np.tile(l,(round(loop_n_samples/len(l)),1))
 
                 self.loop = loop
+                
+                self.second_half_loop = deepcopy(self.loop[len(self.half_loop):])
         else:
             logging.debug('Loop is just the metronome')
             self.loop = deepcopy(self.metronome_loop)
 
         self.loop_time = float(len(self.loop))/float(sample_rate)
-        logging.debug('Loop time:\n\t\t\t\t\t %.2f s'%(self.loop_time))
+        logging.debug('Loop duration:  %.2f s'%(self.loop_time))
 
+    @timing
     def trim(self, loop):
 
         # Number of samples there should be in this loop
         loop_n_samples = round(len(loop)/self.samples_per_beat())*self.samples_per_beat()
 
-        # Empty loop of the proper size
-        trimmed_loop = np.zeros((loop_n_samples,2))
-
         # Adjust for latency
         if loop_n_samples>len(loop)-self.latency_samples:
+            trimmed_loop = np.zeros((loop_n_samples,2))
             trimmed_loop[:len(loop)-self.latency_samples] += loop[self.latency_samples:len(loop)]
         else:
-            trimmed_loop += loop[self.latency_samples:loop_n_samples+self.latency_samples]
+            trimmed_loop = loop[self.latency_samples:loop_n_samples+self.latency_samples]
 
+        return trimmed_loop
+
+    def fade(self, loop, where = ['in','out']):
+        
         # Fade in/out
-        return self.fade(trimmed_loop)
-
-    def fade(self,loop, where = ['in','out']):
-        fade_samples = int(fade_time*sample_rate)
         if 'in' in where:
-            for i in range(fade_samples):
-                loop[i]*=i/fade_samples
-        elif 'out' in where:
-            for i in range(fade_samples):
-                loop[loop_n_samples-1-i]*=i/fade_samples
+            loop[:self.fade_samples]*=self.fadein_mask
+        if 'out' in where:
+            loop[-self.fade_samples:]*=self.fadeout_mask
         return loop
 
     def loop_player(self):
@@ -196,7 +216,7 @@ class Looper(object):
             t.daemon = False
             t.start()
             audio_out.write(self.half_loop)
-            audio_out.write(self.fade(self.loop[len(self.half_loop):],'in'))
+            audio_out.write(self.second_half_loop)
         else:
             audio_out.write(self.loop)
 
@@ -304,7 +324,9 @@ class Looper(object):
         if self.n_loop == 0:
             self.half_loop *= 0
 
-        self.half_loop += self.trim(sound[:n_samples_half_loop+self.latency_samples])
+        sound = self.trim(sound[:n_samples_half_loop+self.latency_samples])
+        sound = self.fade(sound, where = 'in')
+        self.half_loop += sound
 
 
     def add_recording_to_loops(self):
@@ -313,13 +335,13 @@ class Looper(object):
         ts = time.time()
         shutil.copyfile(temp_recording_filename, loop_filename)
         te = time.time()
-        logging.debug('Copying file took:\n\t\t\t\t\t %.0f ms'%((te-ts)*1e3))
+        logging.debug('Copying file took:  %.0f ms'%((te-ts)*1e3))
 
         ts = time.time()
         sound, sr = sf.read(loop_filename, dtype='float32')
         te = time.time()
-        logging.debug('Reading file took:\n\t\t\t\t\t %.0f ms'%((te-ts)*1e3))
-    
+        logging.debug('Reading file took: %.0f ms'%((te-ts)*1e3))
+        
         self.loops.append(sound)
         self.n_loop += 1
 
@@ -338,7 +360,7 @@ class Looper(object):
     
     def time_to_next_loop_start(self):
         t = self.start_time + self.loop_time - time.time()
-        logging.debug('Time to next loop start = %.1f ms'%(t*1e3))
+        # logging.debug('Time to next loop start = %.1f ms'%(t*1e3))
         return t
     
 
@@ -357,7 +379,11 @@ class Looper(object):
         self.blink(rec_led)
 
 
-        
+    def kill(self):
+        logging.debug('Stopping looper...')
+        audio_out.stop()
+        record_flag.clear()
+        time.sleep(0.1)
 
 def all_leds_off():
     for l in [rec_led,play_led,back_led,forw_led]:
@@ -380,9 +406,9 @@ if __name__ == "__main__":
         # Settings
         initial_bpm = 100
         sample_rate = 44100
-        timing_precision = 0.3e-3 # half a milisecond
-        fade_time = 1 # seconds
-        timing_precision_samples = int(timing_precision*sample_rate) # half a milisecond
+        timing_precision = 0.1e-3 # milisecond
+        fade_time = 0.01 # seconds
+        timing_precision_samples = int(timing_precision*sample_rate)
         recording_directory = '/home/pi/Desktop/pi-looper-data/'
 
         # LEDs
@@ -427,10 +453,11 @@ if __name__ == "__main__":
         audio_out.start()
         time.sleep(0.5)
 
-        Looper()
+        looper = Looper()
         while not is_all_buttons_active():
             time.sleep(1)
 
+        looper.kill()
         logging.info('User restarted the looper')
         restart_program()
 
