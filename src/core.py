@@ -82,11 +82,13 @@ class Looper(object):
     def __init__(self):
 
         
-        latency = 50e-3 # seconds (half of what is measured in the test_latency script)
-        self.latency_samples = int(float(latency)*float(sample_rate))
+        self.latency = 50e-3 # seconds (half of what is measured in the test_latency script)
+        self.latency_samples = int(float(self.latency)*float(sample_rate))
         
         self.n_loop = 0
         self.n_loop_previous = 0
+        self.metronome_start_time = None
+        self.start_time = None
         self.loops = []
 
         self.machine = Machine(
@@ -100,9 +102,6 @@ class Looper(object):
         
         led_square()
         play_led.on()
-
-        self.last_written_file_i =0 
-        self.writing = False
 
         # TODO: move this to a better place
         self.fade_samples = int(fade_time*sample_rate)
@@ -121,17 +120,20 @@ class Looper(object):
 
     def on_exit_metronome(self):
 
-        # Make a 4/4 metronome loop
-        self.metronome_loop = np.concatenate((
-            self.metronome_sound,
-            np.tile(self.metronome_sound/2,(3,1))
-            ))
+
+        if len(self.metronome_sound) > self.samples_per_beat():
+            self.metronome_loop = self.metronome_sound[:self.samples_per_beat()]
+        else:
+            self.metronome_loop = np.zeros((self.samples_per_beat(),2), dtype = 'float32')
+            self.metronome_loop[:len(self.metronome_sound)] = self.metronome_sound
+
+        # Make it 4/4
+        self.metronome_loop = np.concatenate((self.metronome_loop,np.tile(self.metronome_loop/2,(3,1))))
+
         self.update_loop() # will set the loop to be the metronome loop
 
-        
-        self.player_thread = threading.Timer(
-            self.time_to_next_loop_start()+(3-self.beat)*self.seconds_per_beat()-play_blocking_delta, 
-            self.loop_player) # start playing the loop
+        time_to_1 = self.metronome_start_time + (4-self.beat)*60/self.bpm - time.time()
+        self.player_thread = threading.Timer(time_to_1, self.loop_player) # start playing the loop
         self.player_thread.daemon = False
         self.player_thread.start()
 
@@ -195,77 +197,35 @@ class Looper(object):
 
     def loop_player(self):
         
+        if self.start_time is None:
+            self.start_time = time.time()
+            logging.debug('Starting time set')
+        else:
+            self.start_time += self.loop_time
+
         # At beginning of loop, exit pre- states
         if self.state == 'pre_rec':
             self.start_recording()
-            t = threading.Timer(
-                self.loop_time/2+timing_precision,
-                self.half_end_recording)
+            t = threading.Timer(self.loop_time/2+timing_precision,self.half_end_recording)
             t.daemon = False
             t.start()
-            self.write(self.loop)
+            audio_out.write(self.loop)
 
         elif self.state == 'pre_play':
             t = threading.Timer(0,self.end_recording)
             t.daemon = False
             t.start()
-            self.write(self.half_loop)
-            self.write(self.second_half_loop)
+            audio_out.write(self.half_loop)
+            audio_out.write(self.second_half_loop)
         else:
-            self.write(self.loop)
+            audio_out.write(self.loop)
 
         # Schedule this function to play in a loop-durations time
-        self.player_thread = threading.Timer(
-            self.time_to_next_loop_start()-play_blocking_delta, # start writing just before
-            self.loop_player)
+        self.player_thread = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
         self.player_thread.daemon = False
         self.player_thread.start()
 
-    def write(self,sound):
-        '''
-        Nearly-blocking
-        '''
-        if self.writing:
-            raise RuntimeError('Trying to play two sounds at the same time')
-        else:
-            self.writing = True
 
-        # So we can modify the sound
-        # object without interfering with the playing
-        sound = deepcopy(sound)
-
-        if file1_flag.isSet():
-            # Currently playing file 1
-
-            # Write to file 0 
-            with sf.SoundFile(temp_playing_filename[0], 
-                mode='w',channels = 2, samplerate=sample_rate) as f:
-                f.write(sound)
-            
-            # Wait for file 0 to start reading
-            while file1_flag.isSet():
-                time.sleep(timing_precision)
-
-            
-        elif not file1_flag.isSet():
-            # Currently playing file 0
-
-            # Write to file 1
-            with sf.SoundFile(temp_playing_filename[1], 
-                mode='w',channels = 2, samplerate=sample_rate) as f:
-                f.write(sound)
-            
-            # Wait for file 1 to start reading
-            while not file1_flag.isSet():
-                time.sleep(timing_precision)
-
-        # Has started playing
-        time_to_end = len(sound)/sample_rate
-        self.time_at_end = time.time()+time_to_end
-        time.sleep(time_to_end-2*play_blocking_delta)
-        self.writing = False
-        
-        
 
     def init_files(self):
         
@@ -279,38 +239,33 @@ class Looper(object):
 
     def init_metronome(self):
         self.bpm = initial_bpm
-        self.time_at_end = time.time()
         self.beat = -1
         metronome_file = self.src_directory+'data/high_hat_001.wav'
         # Extract data and sampling rate from file
-        self.metronome_sound_raw, metronome_sr = sf.read(metronome_file, dtype='float32')
+        self.metronome_sound, metronome_sr = sf.read(metronome_file, dtype='float32')
         if metronome_sr != sample_rate:
             raise RuntimeError('Wrong metronome sample rate: %d instead of %d'%(metronome_sr,sample_rate))
     
     def start_metronome(self):
+        if self.state == 'metronome' or (self.state=='pre_rec' and self.beat in [0,1,2]):
 
-        self.beat = (self.beat +1) %4
-        logging.debug('beat %d'%self.beat)
+            self.beat = (self.beat +1) %4
 
-        # Play metronome beat
-        samples = self.samples_per_beat()
+            if self.metronome_start_time is None:
+                self.metronome_start_time = time.time()
+                logging.debug('Starting time set')
+            else:
+                self.metronome_start_time += 60/self.bpm
 
-        if samples>len(self.metronome_sound_raw):
-            extended = np.zeros((samples,2))
-            extended[:len(self.metronome_sound_raw)] = self.metronome_sound_raw
-            self.metronome_sound = extended
-        else:
-            self.metronome_sound = self.metronome_sound_raw[:samples]
+            if self.beat == 0:
+                sound = self.metronome_sound
+            else:
+                sound = self.metronome_sound/2
 
-        # Adjust if we're on the one
-        if self.beat == 0:
-            self.write(self.metronome_sound)
-        else:
-            self.write(self.metronome_sound/2)
+            audio_out.write(sound[:min(self.samples_per_beat(),len(self.metronome_sound))-timing_precision_samples])
 
-        if self.state == 'metronome' or (self.state != 'metronome' and self.beat<3):
-            t = threading.Timer(self.time_to_next_loop_start()-play_blocking_delta
-            ,self.start_metronome)
+            time_to_next_beat = self.metronome_start_time + 60/self.bpm - time.time()
+            t = threading.Timer(time_to_next_beat,self.start_metronome)
             t.daemon = False
             t.start()
 
@@ -354,7 +309,6 @@ class Looper(object):
         self.trigger('start_recording')
 
     def end_recording(self):
-        time.sleep(latency*3) # to not miss any notes! 
         record_flag.clear()
         self.add_recording_to_loops()
         self.update_loop()
@@ -405,8 +359,8 @@ class Looper(object):
         rec_led.on()
     
     def time_to_next_loop_start(self):
-        t= self.time_at_end -time.time() # time to end currently playing loop
-        logging.debug('Time to next loop: %.2f'%t)
+        t = self.start_time + self.loop_time - time.time()
+        # logging.debug('Time to next loop start = %.1f ms'%(t*1e3))
         return t
     
 
@@ -427,9 +381,9 @@ class Looper(object):
 
     def kill(self):
         logging.debug('Stopping looper...')
-        stop_streams_flags.set()
-        recording_thread.join()
-        playing_thread.join()
+        audio_out.stop()
+        record_flag.clear()
+        time.sleep(0.1)
 
 def all_leds_off():
     for l in [rec_led,play_led,back_led,forw_led]:
@@ -451,11 +405,9 @@ if __name__ == "__main__":
     try:
         # Settings
         initial_bpm = 100
-        latency = 0.05 # works fine 
         sample_rate = 44100
         timing_precision = 0.1e-3 # milisecond
-        fade_time = 0.03 # seconds
-        play_blocking_delta = 0.1 # sets how much time in advance you have to click stuff
+        fade_time = 0.01 # seconds
         timing_precision_samples = int(timing_precision*sample_rate)
         recording_directory = '/home/pi/Desktop/pi-looper-data/'
 
@@ -478,9 +430,6 @@ if __name__ == "__main__":
             return True
 
 
-        stop_streams_flags = threading.Event()
-        stop_streams_flags.clear()
-
         # Initialize recording
         temp_recording_filename = os.path.join(
             recording_directory,
@@ -490,40 +439,19 @@ if __name__ == "__main__":
         recording_thread = threading.Thread(name='recorder',
                         target=daemons.recorder,
                         args=(record_flag,
-                        stop_streams_flags,
                         timing_precision,
                         temp_recording_filename),
                         daemon = False)
         recording_thread.start()
 
         # setup audio
-        temp_playing_filename = [
-            os.path.join(
-            recording_directory,
-            'temp_playing_file0.wav'),
-            os.path.join(
-            recording_directory,
-            'temp_playing_file1.wav'),
-        ]
-        for fn in temp_playing_filename:
-            with sf.SoundFile(fn, mode='w',channels = 2, samplerate=sample_rate) as f:
-                f.write(np.zeros((int(sample_rate*timing_precision),2)))
-        
-        playing_flag = threading.Event()
-        file1_flag = threading.Event()
-        playing_flag.set()
-        file1_flag.clear()
-        playing_thread = threading.Thread(name='player',
-                        target=daemons.player,
-                        args=(playing_flag,
-                        file1_flag,
-                        stop_streams_flags,
-                        latency,
-                        temp_playing_filename),
-                        daemon = False)
-        playing_thread.start()
-
-
+        audio_out = sd.OutputStream(
+            samplerate=sample_rate,
+            channels = 2,
+            latency = 0.05,
+            dtype='float32')
+        audio_out.start()
+        time.sleep(0.5)
 
         looper = Looper()
         while not is_all_buttons_active():
