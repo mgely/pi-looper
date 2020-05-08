@@ -79,6 +79,7 @@ class Looper(object):
         ['release_back_button',         'pre_play',     'play'], # didnt add current recording
         #
         ['release_back_button',         'play',     'back'], # didnt add current recording
+        ['end_going_back',              'back',     'play'], # didnt add current recording
     ]
 
     def __init__(self):
@@ -139,12 +140,42 @@ class Looper(object):
         self.player_thread.start()
 
     @timing
-    def add_samples_to_loop(self):
-        # TODO just add the new sample to the old loop rather
-        # than doing everything from scratch..
+    def add_recording_to_loop(self):
 
         logging.debug('Updating loop ...')
         self.n_loop += 1
+        
+
+        # Add recording to samples
+
+        # Extract audio
+        loop_filename = self.loop_filename.format(self.n_loop)
+        ts = time.time()
+        shutil.copyfile(temp_recording_filename, loop_filename)
+        te = time.time()
+        logging.debug('Copying file took:  %.0f ms'%((te-ts)*1e3))
+
+        ts = time.time()
+        sound, sr = sf.read(loop_filename, dtype='float32')
+        te = time.time()
+        logging.debug('Reading file took: %.0f ms'%((te-ts)*1e3))
+        
+
+        # First round:
+        # self.n_loop is 1
+        # len(self.samples) is 0
+        # so if len(self.samples)>=self.n_loop
+        # we should remove all samples starting from
+        # index self.n_loop
+        if len(self.samples)>=self.n_loop:
+            self.samples = self.samples[:self.n_loop-1]
+        self.samples.append(sound)
+
+
+        # Add samples together to form loop
+
+        # TODO just add the new sample to the old loop rather
+        # than doing everything from scratch..
 
         loop_lengths = [len(l) for l in self.samples[:self.n_loop]]
         
@@ -152,7 +183,7 @@ class Looper(object):
         loop_n_samples = round(max(loop_lengths)/self.samples_per_beat())*self.samples_per_beat()
 
         loop = np.zeros((loop_n_samples,2), dtype = 'float32')
-        for l in self.samples:
+        for l in self.samples[:self.n_loop]:
 
             # trim, fade in/out
             l = self.trim(l)
@@ -284,6 +315,12 @@ class Looper(object):
                 logging.debug("bpm = %d"%self.bpm)
                 time.sleep(0.06)
             back_led.on()
+        if self.state == 'back':
+            self.n_loop +=1
+            if self.n_loop == self.n_loop_before_back:
+                self.trigger('end_going_back')                
+            else:
+                self.blink(back_led, self.n_loop_before_back-self.n_loop)
 
     def press_back_button(self):
         if self.state == 'metronome':
@@ -293,6 +330,12 @@ class Looper(object):
                 logging.debug("bpm = %d"%self.bpm)
                 time.sleep(0.06)
             forw_led.on()
+        if self.state == 'back' and self.n_loop > 0:
+            self.n_loop -=1
+            if self.n_loop == 0:
+                back_led.on()
+            else:
+                self.blink(back_led, self.n_loop_before_back-self.n_loop)
 
     def init_hardware(self):
 
@@ -311,9 +354,11 @@ class Looper(object):
 
     def end_recording(self):
         record_flag.clear()
-        self.add_recording_to_samples()
-        self.add_samples_to_loop()
+        self.add_recording_to_loop()
         self.trigger('end_recording')
+
+    def end_going_back(self):
+        self.trigger('end_going_back')
 
     def half_end_recording(self):
         sound, sr = sf.read(temp_recording_filename, dtype='float32')
@@ -329,21 +374,6 @@ class Looper(object):
         self.half_loop += sound
 
 
-    def add_recording_to_samples(self):
-        # Extract audio
-        loop_filename = self.loop_filename.format(self.n_loop)
-        ts = time.time()
-        shutil.copyfile(temp_recording_filename, loop_filename)
-        te = time.time()
-        logging.debug('Copying file took:  %.0f ms'%((te-ts)*1e3))
-
-        ts = time.time()
-        sound, sr = sf.read(loop_filename, dtype='float32')
-        te = time.time()
-        logging.debug('Reading file took: %.0f ms'%((te-ts)*1e3))
-        
-        self.samples.append(sound)
-
     def on_enter(self):
         all_leds_off()
 
@@ -352,6 +382,24 @@ class Looper(object):
 
         play_led.on()
         record_flag.clear()
+
+    def on_enter_back(self):
+        if self.n_loop == 0:
+            self.trigger('end_going_back')
+            return
+
+        self.on_enter()
+
+        self.blink(back_led)
+
+        self.n_loop -= 1
+
+        t = threading.Timer(
+            self.time_to_next_loop_start(),
+            self.end_going_back)
+
+        t.daemon = False
+        t.start()
 
     def on_enter_rec(self):
         self.on_enter()
@@ -369,7 +417,7 @@ class Looper(object):
     
         
 
-    def blink(self, led):
+    def blink(self, led, times=1):
         led.blink(on_time = self.blink_on_time, off_time= self.seconds_per_beat()-self.blink_on_time)
         
 
