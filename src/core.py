@@ -56,7 +56,7 @@ sys.excepthook = my_handler
 
 class Looper(object):
 
-    states = ['rec', 'play', 'pre_rec', 'pre_play','pause','metronome']
+    states = ['rec', 'play', 'pre_rec', 'pre_play','pause','metronome', 'back']
 
     transitions = [
         # trigger                       # source        # destination
@@ -77,6 +77,8 @@ class Looper(object):
         ['end_recording',              'pre_play',     'play'], # added current recording
         ['release_rec_button',          'pre_play',     'pre_rec'],
         ['release_back_button',         'pre_play',     'play'], # didnt add current recording
+        #
+        ['release_back_button',         'play',     'back'], # didnt add current recording
     ]
 
     def __init__(self):
@@ -86,10 +88,9 @@ class Looper(object):
         self.latency_samples = int(float(self.latency)*float(sample_rate))
         
         self.n_loop = 0
-        self.n_loop_previous = 0
         self.metronome_start_time = None
         self.start_time = None
-        self.loops = []
+        self.samples = []
 
         self.machine = Machine(
             model = self,
@@ -122,15 +123,15 @@ class Looper(object):
 
 
         if len(self.metronome_sound) > self.samples_per_beat():
-            self.metronome_loop = self.metronome_sound[:self.samples_per_beat()]
+            metronome_loop = self.metronome_sound[:self.samples_per_beat()]
         else:
-            self.metronome_loop = np.zeros((self.samples_per_beat(),2), dtype = 'float32')
-            self.metronome_loop[:len(self.metronome_sound)] = self.metronome_sound
+            metronome_loop = np.zeros((self.samples_per_beat(),2), dtype = 'float32')
+            metronome_loop[:len(self.metronome_sound)] = self.metronome_sound
 
         # Make it 4/4
-        self.metronome_loop = np.concatenate((self.metronome_loop,np.tile(self.metronome_loop/2,(3,1))))
-
-        self.update_loop() # will set the loop to be the metronome loop
+        metronome_loop = np.concatenate((metronome_loop,np.tile(metronome_loop/2,(3,1))))
+        
+        self.loop = [metronome_loop]
 
         time_to_1 = self.metronome_start_time + (4-self.beat)*60/self.bpm - time.time()
         self.player_thread = threading.Timer(time_to_1, self.loop_player) # start playing the loop
@@ -138,41 +139,37 @@ class Looper(object):
         self.player_thread.start()
 
     @timing
-    def update_loop(self):
+    def add_samples_to_loop(self):
+        # TODO just add the new sample to the old loop rather
+        # than doing everything from scratch..
+
         logging.debug('Updating loop ...')
-        if self.n_loop > 0:
-            if self.n_loop != self.n_loop_previous:
-                
-                self.n_loop_previous = self.n_loop
+        self.n_loop += 1
 
-                loop_lengths = [len(l) for l in self.loops[:self.n_loop]]
-                
-                # Round the longest loop to a certain number of beats
-                loop_n_samples = round(max(loop_lengths)/self.samples_per_beat())*self.samples_per_beat()
+        loop_lengths = [len(l) for l in self.samples[:self.n_loop]]
+        
+        # Round the longest loop to a certain number of beats
+        loop_n_samples = round(max(loop_lengths)/self.samples_per_beat())*self.samples_per_beat()
 
-                loop = np.zeros((loop_n_samples,2), dtype = 'float32')
-                for l in self.loops:
+        loop = np.zeros((loop_n_samples,2), dtype = 'float32')
+        for l in self.samples:
 
-                    # trim
-                    l = self.trim(l)
-                    # fade in/out
-                    l = self.fade(l)
+            # trim, fade in/out
+            l = self.trim(l)
 
-                    # stitch N versions of the sample together and add to master loop
-                    loop += np.tile(l,(round(loop_n_samples/len(l)),1))
+            # stitch N versions of the sample together and add to master loop
+            loop += np.tile(l,(round(loop_n_samples/len(l)),1))
 
-                self.loop = loop
-                
-                self.second_half_loop = deepcopy(self.loop[len(self.half_loop):])
-        else:
-            logging.debug('Loop is just the metronome')
-            self.loop = deepcopy(self.metronome_loop)
+        try:
+            self.loop[self.n_loop] = loop
+        except IndexError:
+            self.loop.append(loop)
 
-        self.loop_time = float(len(self.loop))/float(sample_rate)
-        logging.debug('Loop duration:  %.2f s'%(self.loop_time))
+        self.second_half_loop = deepcopy(loop[len(self.half_loop):])
+
 
     @timing
-    def trim(self, loop):
+    def trim(self, loop, fade_where = ['in','out']):
 
         # Number of samples there should be in this loop
         loop_n_samples = round(len(loop)/self.samples_per_beat())*self.samples_per_beat()
@@ -180,9 +177,9 @@ class Looper(object):
         # Adjust for latency
         if loop_n_samples>len(loop)-self.latency_samples:
             trimmed_loop = np.zeros((loop_n_samples,2))
-            trimmed_loop[:len(loop)-self.latency_samples] += loop[self.latency_samples:len(loop)]
+            trimmed_loop[:len(loop)-self.latency_samples] += self.fade(loop[self.latency_samples:len(loop)], where=fade_where)
         else:
-            trimmed_loop = loop[self.latency_samples:loop_n_samples+self.latency_samples]
+            trimmed_loop = self.fade(loop[self.latency_samples:loop_n_samples+self.latency_samples], where=fade_where)
 
         return trimmed_loop
 
@@ -195,21 +192,25 @@ class Looper(object):
             loop[-self.fade_samples:]*=self.fadeout_mask
         return loop
 
+
+    def loop_time(self):
+        return float(len(self.loop[self.n_loop]))/float(sample_rate)
+
     def loop_player(self):
         
         if self.start_time is None:
             self.start_time = time.time()
             logging.debug('Starting time set')
         else:
-            self.start_time += self.loop_time
+            self.start_time += self.loop_time()
 
         # At beginning of loop, exit pre- states
         if self.state == 'pre_rec':
             self.start_recording()
-            t = threading.Timer(self.loop_time/2+timing_precision,self.half_end_recording)
+            t = threading.Timer(self.loop_time()/2+timing_precision,self.half_end_recording)
             t.daemon = False
             t.start()
-            audio_out.write(self.loop)
+            audio_out.write(self.loop[self.n_loop])
 
         elif self.state == 'pre_play':
             t = threading.Timer(0,self.end_recording)
@@ -218,7 +219,7 @@ class Looper(object):
             audio_out.write(self.half_loop)
             audio_out.write(self.second_half_loop)
         else:
-            audio_out.write(self.loop)
+            audio_out.write(self.loop[self.n_loop])
 
         # Schedule this function to play in a loop-durations time
         self.player_thread = threading.Timer(self.time_to_next_loop_start(),self.loop_player)
@@ -310,26 +311,25 @@ class Looper(object):
 
     def end_recording(self):
         record_flag.clear()
-        self.add_recording_to_loops()
-        self.update_loop()
+        self.add_recording_to_samples()
+        self.add_samples_to_loop()
         self.trigger('end_recording')
 
     def half_end_recording(self):
         sound, sr = sf.read(temp_recording_filename, dtype='float32')
-        n_samples_half_loop = int(len(self.loop)/2)
-        self.half_loop = deepcopy(self.loop[:n_samples_half_loop])
+        n_samples_half_loop = int(len(self.loop[self.n_loop])/2)
+        self.half_loop = deepcopy(self.loop[self.n_loop][:n_samples_half_loop])
 
         # If this is the first recording, 
         # we want to remove the metronome
         if self.n_loop == 0:
             self.half_loop *= 0
 
-        sound = self.trim(sound[:n_samples_half_loop+self.latency_samples])
-        sound = self.fade(sound, where = 'in')
+        sound = self.trim(sound[:n_samples_half_loop+self.latency_samples], fade_where = 'in')
         self.half_loop += sound
 
 
-    def add_recording_to_loops(self):
+    def add_recording_to_samples(self):
         # Extract audio
         loop_filename = self.loop_filename.format(self.n_loop)
         ts = time.time()
@@ -342,8 +342,7 @@ class Looper(object):
         te = time.time()
         logging.debug('Reading file took: %.0f ms'%((te-ts)*1e3))
         
-        self.loops.append(sound)
-        self.n_loop += 1
+        self.samples.append(sound)
 
     def on_enter(self):
         all_leds_off()
@@ -359,7 +358,7 @@ class Looper(object):
         rec_led.on()
     
     def time_to_next_loop_start(self):
-        t = self.start_time + self.loop_time - time.time()
+        t = self.start_time + self.loop_time() - time.time()
         # logging.debug('Time to next loop start = %.1f ms'%(t*1e3))
         return t
     
@@ -406,8 +405,8 @@ if __name__ == "__main__":
         # Settings
         initial_bpm = 100
         sample_rate = 44100
-        timing_precision = 0.1e-3 # milisecond
-        fade_time = 0.01 # seconds
+        timing_precision = 0.1e-3 # seconds
+        fade_time = 0.01# seconds
         timing_precision_samples = int(timing_precision*sample_rate)
         recording_directory = '/home/pi/Desktop/pi-looper-data/'
 
